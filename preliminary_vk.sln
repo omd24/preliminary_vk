@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.31129.286
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vk_basics", "vk_basics\vk_basics.vcxproj", "{FB3D473A-106A-4849-9E9E-6B8963CD20DD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Debug|x64.ActiveCfg = Debug|x64
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Debug|x64.Build.0 = Debug|x64
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Debug|x86.ActiveCfg = Debug|Win32
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Debug|x86.Build.0 = Debug|Win32
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Release|x64.ActiveCfg = Release|x64
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Release|x64.Build.0 = Release|x64
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Release|x86.ActiveCfg = Release|Win32
+		{FB3D473A-106A-4849-9E9E-6B8963CD20DD}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {26F69075-BCFA-48C5-BA19-E68DF349A93B}
+	EndGlobalSection
+EndGlobal
