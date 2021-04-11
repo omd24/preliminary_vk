@@ -1,6 +1,10 @@
 #pragma once
 #include <vulkan/vulkan.h>
 
+#define TRM_GREEN   "\x1b[1;32m"
+#define TRM_GOLD    "\x1b[1;33m"
+#define TRM_RESET   "\x1b[0m"
+
 static inline const char* string_VkObjectType(VkObjectType input_value) {
     switch ((VkObjectType)input_value) {
         case VK_OBJECT_TYPE_QUERY_POOL:
@@ -79,3 +83,4 @@ static inline const char* string_VkObjectType(VkObjectType input_value) {
             return "Unhandled VkObjectType";
     }
 }
+

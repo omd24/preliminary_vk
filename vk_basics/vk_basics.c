@@ -23,7 +23,7 @@
 #pragma comment(linker, "/subsystem:windows")
 
 // Global variables
-bool global_suppress_popups = true;
+bool global_suppress_popups = false;
 static int global_validation_error = 0;
 
 // Debugging tools
@@ -33,10 +33,10 @@ static int global_validation_error = 0;
 #error "Define at most one."
 #endif
 
-#define ERROR_EXIT(err_msg, err_class)                      \
+#define ERREXIT(err_msg, err_class)                      \
     do {                                                    \
         if (!global_suppress_popups)                        \
-            MessageBox(NULL, err_msg, err_class, MB_OK);    \
+            MessageBox(NULL, _T(err_msg), _T(err_class), MB_OK);    \
     } while (0)
 
 // Vulkan
@@ -49,13 +49,19 @@ static int global_validation_error = 0;
 typedef struct {
     VkInstance inst;
 
+    int width;
+    int height;
+
+    int gpu_number;
+    VkPhysicalDevice gpu;
+
     // function pointers
     PFN_vkCreateDebugUtilsMessengerEXT create_debug_utils_messenger_ext;
 
     VkDebugUtilsMessengerEXT dbg_messenger;
 } Demo;
 
-VKAPI_ATTR VkBool32 VKAPI_CALL
+static VkBool32
 debug_messenger_callback (
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -96,21 +102,21 @@ debug_messenger_callback (
         }
     }
 
-    _stprintf(message, _T("%s - Message Id Number: %d | Message Id Name: %s\n\t%s\n"), prefix, pCallbackData->messageIdNumber,
-            pCallbackData->pMessageIdName, pCallbackData->pMessage);
+    _stprintf(message, _T("%hs - Message Id Number: %d | Message Id Name: %hs\n\t%hs\n"), prefix, pCallbackData->messageIdNumber,
+              pCallbackData->pMessageIdName, pCallbackData->pMessage);
     if (pCallbackData->objectCount > 0) {
         TCHAR tmp_message[500];
         _stprintf(tmp_message, _T("\n\tObjects - %d\n"), pCallbackData->objectCount);
         _tcscat(message, tmp_message);
         for (uint32_t object = 0; object < pCallbackData->objectCount; ++object) {
             if (NULL != pCallbackData->pObjects[object].pObjectName && strlen(pCallbackData->pObjects[object].pObjectName) > 0) {
-                _stprintf(tmp_message, _T("\t\tObject[%d] - %s, Handle %p, Name \"%s\"\n"), object,
-                        string_VkObjectType(pCallbackData->pObjects[object].objectType),
-                        (void *)(pCallbackData->pObjects[object].objectHandle), pCallbackData->pObjects[object].pObjectName);
+                _stprintf(tmp_message, _T("\t\tObject[%d] - %hs, Handle %p, Name \"%hs\"\n"), object,
+                          string_VkObjectType(pCallbackData->pObjects[object].objectType),
+                          (void *)(pCallbackData->pObjects[object].objectHandle), pCallbackData->pObjects[object].pObjectName);
             } else {
-                _stprintf(tmp_message, _T("\t\tObject[%d] - %s, Handle %p\n"), object,
-                        string_VkObjectType(pCallbackData->pObjects[object].objectType),
-                        (void *)(pCallbackData->pObjects[object].objectHandle));
+                _stprintf(tmp_message, _T("\t\tObject[%d] - %hs, Handle %p\n"), object,
+                          string_VkObjectType(pCallbackData->pObjects[object].objectType),
+                          (void *)(pCallbackData->pObjects[object].objectHandle));
             }
             _tcscat(message, tmp_message);
         }
@@ -120,10 +126,10 @@ debug_messenger_callback (
         _stprintf(tmp_message, _T("\n\tCommand Buffer Labels - %d\n"), pCallbackData->cmdBufLabelCount);
         _tcscat(message, tmp_message);
         for (uint32_t cmd_buf_label = 0; cmd_buf_label < pCallbackData->cmdBufLabelCount; ++cmd_buf_label) {
-            _stprintf(tmp_message, _T("\t\tLabel[%d] - %s { %f, %f, %f, %f}\n"), cmd_buf_label,
-                    pCallbackData->pCmdBufLabels[cmd_buf_label].pLabelName, pCallbackData->pCmdBufLabels[cmd_buf_label].color[0],
-                    pCallbackData->pCmdBufLabels[cmd_buf_label].color[1], pCallbackData->pCmdBufLabels[cmd_buf_label].color[2],
-                    pCallbackData->pCmdBufLabels[cmd_buf_label].color[3]);
+            _stprintf(tmp_message, _T("\t\tLabel[%d] - %hs { %f, %f, %f, %f}\n"), cmd_buf_label,
+                      pCallbackData->pCmdBufLabels[cmd_buf_label].pLabelName, pCallbackData->pCmdBufLabels[cmd_buf_label].color[0],
+                      pCallbackData->pCmdBufLabels[cmd_buf_label].color[1], pCallbackData->pCmdBufLabels[cmd_buf_label].color[2],
+                      pCallbackData->pCmdBufLabels[cmd_buf_label].color[3]);
             _tcscat(message, tmp_message);
         }
     }
@@ -135,7 +141,14 @@ debug_messenger_callback (
     // Don't bail out, but keep going.
     return false;
 }
-
+static void
+demo_init (Demo * demo, int w, int h) {
+    _ASSERT_EXPR(demo, _T("Invalid demo pointer"));
+    memset(demo, 0, sizeof(demo));
+    demo->width = w;
+    demo->height = h;
+    demo->gpu_number = -1;
+}
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -188,7 +201,10 @@ WinMain (
 
 #pragma region Vulkan Initial Setup
     Demo demo = {0};
-
+    demo_init(&demo, 500, 500);
+    //
+    // Init instance
+    //
     VkApplicationInfo app_info = {0};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pNext = NULL;
@@ -213,32 +229,98 @@ WinMain (
 
     VkResult err = VK_NOT_READY;
 
-    VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info;
-    // VK_EXT_debug_utils style
-    dbg_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    dbg_messenger_create_info.pNext = NULL;
-    dbg_messenger_create_info.flags = 0;
-    dbg_messenger_create_info.messageSeverity =
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-    dbg_messenger_create_info.pfnUserCallback = debug_messenger_callback;
-    dbg_messenger_create_info.pUserData = &demo;
+    //VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info;
+    //// VK_EXT_debug_utils style
+    //dbg_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    //dbg_messenger_create_info.pNext = NULL;
+    //dbg_messenger_create_info.flags = 0;
+    //dbg_messenger_create_info.messageSeverity =
+    //    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    //dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+    //    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+    //    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    //dbg_messenger_create_info.pfnUserCallback = debug_messenger_callback;
+    //dbg_messenger_create_info.pUserData = &demo;
+    //inst_info.pNext = &dbg_messenger_create_info;
 
-
-    inst_info.pNext = &dbg_messenger_create_info;
     err = vkCreateInstance(&inst_info, NULL, &demo.inst);
 
-   // NOTE(omid): VK_EXT_debug_utils extension not enabled yet 
-    /*demo.create_debug_utils_messenger_ext =
-        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
-    err = demo.create_debug_utils_messenger_ext(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
-    ERROR_EXIT(
-        _T("Cannot find a compatible Vulkan installable client driver (ICD)\n")
-        _T("Refer to specs for more info\n"),
-        _T("vkCreateInstance failed)")
-    );
+    if (err == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        ERREXIT(
+            "Cannot find a compatible Vulkan installable client driver (ICD)\n"
+            "Refer to specs for more info\n",
+            "vkCreateInstance failed)"
+        );
+    } else if (err) {
+        ERREXIT(
+            "Cannot find a specified extension library.\n"
+            "Make sure layer paths are correct\n",
+            "vkCreateInstance failed"
+        );
+    } else if (err) {
+        ERREXIT(
+            "Something went wrong.\n"
+            "Do you have a vulkan installabed ICD?\n",
+            "vkCreateInstance failed"
+        );
+    }
+// NOTE(omid): VK_EXT_debug_utils extension not enabled yet 
+ /*demo.create_debug_utils_messenger_ext =
+     (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
+ err = demo.create_debug_utils_messenger_ext(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
+
+    //
+    // Enumerate physical devices
+    //
+    UINT gpu_count = 0;
+    err = vkEnumeratePhysicalDevices(demo.inst, &gpu_count, NULL);
+    if (gpu_count < 1)
+        ERREXIT("vkEnumeratePhysicalDevices reported zero device??\n", "vkEnumeratePhysicalDevices failed");
+    VkPhysicalDevice * physical_devices = (VkPhysicalDevice *)calloc(gpu_count, sizeof(VkPhysicalDevice));
+    err = vkEnumeratePhysicalDevices(demo.inst, &gpu_count, physical_devices);
+    _ASSERT_EXPR(!err, _T("Filling physical_devices array failed"));
+
+    //
+    // Auto-select suitable device
+    //
+    if (demo.gpu_number == -1) {
+        UINT count_device_type[VK_PHYSICAL_DEVICE_TYPE_CPU + 1] = {0};
+        VkPhysicalDeviceProperties device_props = {0};
+        for (UINT i = 0; i < gpu_count; i++) {
+            vkGetPhysicalDeviceProperties(physical_devices[i], &device_props);
+            ++count_device_type[device_props.deviceType];
+        }
+        VkPhysicalDeviceType search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (count_device_type[VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU]) {
+            search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        } else if (count_device_type[VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU]) {
+            search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        } else if (count_device_type[VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU]) {
+            search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+        } else if (count_device_type[VK_PHYSICAL_DEVICE_TYPE_CPU]) {
+            search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_CPU;
+        } else if (count_device_type[VK_PHYSICAL_DEVICE_TYPE_OTHER]) {
+            search_for_device_type = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+        }
+        for (UINT i = 0; i < gpu_count; i++) {
+            vkGetPhysicalDeviceProperties(physical_devices[i], &device_props);
+            if (device_props.deviceType == search_for_device_type) {
+                demo.gpu_number = i;
+                break;
+            }
+        }
+    }
+    _ASSERT_EXPR(demo.gpu_number >= 0, _T("Could not select device"));
+    if (physical_devices)
+        demo.gpu = physical_devices[demo.gpu_number];
+    {
+        VkPhysicalDeviceProperties device_props = {0};
+        vkGetPhysicalDeviceProperties(demo.gpu, &device_props);
+        TCHAR buf[250];
+        _stprintf(buf, _T("Selected gpu %d: %hs, type: %u\n"), demo.gpu_number, device_props.deviceName, device_props.deviceType);
+        OutputDebugString(buf);
+    }
+    free(physical_devices);
 #pragma endregion
 
 #pragma region Main Loop
