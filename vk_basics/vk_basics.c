@@ -23,7 +23,7 @@
 #pragma comment(linker, "/subsystem:windows")
 
 // Global variables
-bool global_suppress_popups = false;
+bool global_suppress_popups = true;
 static int global_validation_error = 0;
 
 // Debugging tools
@@ -35,7 +35,7 @@ static int global_validation_error = 0;
 
 #define ERROR_EXIT(err_msg, err_class)                      \
     do {                                                    \
-        if (global_suppress_popups)                         \
+        if (!global_suppress_popups)                        \
             MessageBox(NULL, err_msg, err_class, MB_OK);    \
     } while (0)
 
@@ -144,9 +144,6 @@ WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
         PostQuitMessage(0);
         result = 0;
     }break;
-    case WM_PAINT: {
-        result = 0;
-    } break;
     default: {
         result = DefWindowProc(hwnd, msg_code, wparam, lparam);
     } break;
@@ -237,7 +234,6 @@ WinMain (
     /*demo.create_debug_utils_messenger_ext =
         (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
     err = demo.create_debug_utils_messenger_ext(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
-
     ERROR_EXIT(
         _T("Cannot find a compatible Vulkan installable client driver (ICD)\n")
         _T("Refer to specs for more info\n"),
