@@ -8,6 +8,7 @@
 #pragma warning(disable : 5105)     // macro expansion producing 'defined' has undefined behavior
 #pragma warning(disable : 4477)     // vk types used in fmt str
 #pragma warning(disable : 6302)     // vk types used in fmt str
+#pragma warning(disable : 6011)     // derefrencing null pointer?
 
 #include <windows.h>
 #include <tchar.h>
@@ -47,16 +48,20 @@ static int global_validation_error = 0;
 #include "utils.h"
 
 typedef struct {
-    VkInstance inst;
+    VkInstance                  inst;
+    VkDevice                    device;
 
-    int width;
-    int height;
+    int                         width;
+    int                         height;
 
-    int gpu_number;
-    VkPhysicalDevice gpu;
+    int                         gpu_number;
+    VkPhysicalDevice            gpu;
+    UINT                        queue_family_count;
+    VkQueueFamilyProperties *   queue_props;
+    UINT                        graphics_queue_family_index;
 
     // function pointers
-    PFN_vkCreateDebugUtilsMessengerEXT create_debug_utils_messenger_ext;
+    PFN_vkCreateDebugUtilsMessengerEXT  create_debug_utils_messenger_ext;
 
     VkDebugUtilsMessengerEXT dbg_messenger;
 } Demo;
@@ -102,8 +107,11 @@ debug_messenger_callback (
         }
     }
 
-    _stprintf(message, _T("%hs - Message Id Number: %d | Message Id Name: %hs\n\t%hs\n"), prefix, pCallbackData->messageIdNumber,
-              pCallbackData->pMessageIdName, pCallbackData->pMessage);
+    _stprintf(
+        message, _T("%ls - Message Id Number: %d | Message Id Name: %hs\n\t%hs\n"),
+        prefix, pCallbackData->messageIdNumber,
+        pCallbackData->pMessageIdName, pCallbackData->pMessage
+    );
     if (pCallbackData->objectCount > 0) {
         TCHAR tmp_message[500];
         _stprintf(tmp_message, _T("\n\tObjects - %d\n"), pCallbackData->objectCount);
@@ -321,6 +329,52 @@ WinMain (
         OutputDebugString(buf);
     }
     free(physical_devices);
+
+    // TODO(omid): enumerate device extensions 
+
+    // TODO(omid): setup VK_EXT_debug_utils function pointers
+
+    vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, NULL);
+    _ASSERT_EXPR(demo.queue_family_count > 0, "Not enough queue family count");
+    demo.queue_props = (VkQueueFamilyProperties *)calloc(demo.queue_family_count, sizeof(VkQueueFamilyProperties));
+    vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, demo.queue_props);
+    //
+    // Search for a graphics in the array of queue families
+    //
+    UINT graphics_qfamid = UINT32_MAX;
+    for (UINT i = 0; i < demo.queue_family_count; i++) {
+        if ((demo.queue_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+            if (graphics_qfamid == UINT32_MAX) {
+                graphics_qfamid = i;
+                break;
+            }
+        }
+    }
+    _ASSERT_EXPR(graphics_qfamid != UINT32_MAX, _T("Didnt found graphics queue family index"));
+    demo.graphics_queue_family_index = graphics_qfamid;
+
+    float queue_priorites[1] = {0.0f};
+    VkDeviceQueueCreateInfo queue_info = {0};
+    queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_info.pNext = NULL;
+    queue_info.queueFamilyIndex = demo.graphics_queue_family_index;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = queue_priorites;
+
+    VkDeviceCreateInfo device_info = {0};
+    device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_info.pNext = NULL;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = 0;
+    device_info.ppEnabledExtensionNames = NULL;
+    device_info.enabledLayerCount = 0;
+    device_info.ppEnabledLayerNames = NULL;
+    device_info.pEnabledFeatures = NULL;
+
+    err = vkCreateDevice(demo.gpu, &device_info, NULL, &demo.device);
+    _ASSERT_EXPR(!err, _T("vkCreateDevice failed"));
+
 #pragma endregion
 
 #pragma region Main Loop
@@ -332,7 +386,7 @@ WinMain (
     }
 #pragma endregion
 
-
+    // TODO(omid): Cleanups 
     return(0);
 }
 
