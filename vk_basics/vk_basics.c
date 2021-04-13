@@ -51,6 +51,9 @@ typedef struct {
     VkInstance                  inst;
     VkDevice                    device;
 
+    VkCommandPool               cmd_pool;
+    VkCommandBuffer             cmd_buf;
+
     int                         width;
     int                         height;
 
@@ -156,6 +159,7 @@ demo_init (Demo * demo, int w, int h) {
     demo->width = w;
     demo->height = h;
     demo->gpu_number = -1;
+    demo->cmd_pool = VK_NULL_HANDLE;
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -374,6 +378,34 @@ WinMain (
 
     err = vkCreateDevice(demo.gpu, &device_info, NULL, &demo.device);
     _ASSERT_EXPR(!err, _T("vkCreateDevice failed"));
+    //
+    //  Initi command buffer
+    //
+    if (demo.cmd_pool == VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo pool_info = {0};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.pNext = NULL;
+        pool_info.queueFamilyIndex = demo.graphics_queue_family_index;
+        pool_info.flags = 0;
+        err = vkCreateCommandPool(demo.device, &pool_info, NULL, &demo.cmd_pool);
+        _ASSERT_EXPR(!err, _T("vkCreateCommandPool failed"));
+    }
+    VkCommandBufferAllocateInfo cmd_buf_alloc_info = {0};
+    cmd_buf_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_buf_alloc_info.pNext = NULL;
+    cmd_buf_alloc_info.commandPool = demo.cmd_pool;
+    cmd_buf_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_buf_alloc_info.commandBufferCount = 1;
+    err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_info, &demo.cmd_buf);
+    _ASSERT_EXPR(!err, _T("vkAllocateCommandBuffers failed"));
+
+    VkCommandBufferBeginInfo cmd_buf_begin_info = {0};
+    cmd_buf_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cmd_buf_begin_info.pNext = NULL;
+    cmd_buf_begin_info.flags = 0;
+    cmd_buf_begin_info.pInheritanceInfo = NULL;
+    err = vkBeginCommandBuffer(demo.cmd_buf, &cmd_buf_begin_info);
+    _ASSERT_EXPR(!err, _T("vkBeginCommandBuffer failed"));
 
 #pragma endregion
 
