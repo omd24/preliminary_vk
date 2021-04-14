@@ -10,6 +10,10 @@
 #pragma warning(disable : 6302)     // vk types used in fmt str
 #pragma warning(disable : 6011)     // derefrencing null pointer?
 
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+
 #include <windows.h>
 #include <tchar.h>
 #include <stdio.h>
@@ -56,6 +60,10 @@ typedef struct {
 
     int                         width;
     int                         height;
+    HINSTANCE                   connection;
+    HWND                        window;
+
+    VkSurfaceKHR                surface;
 
     int                         gpu_number;
     VkPhysicalDevice            gpu;
@@ -64,7 +72,8 @@ typedef struct {
     UINT                        graphics_queue_family_index;
 
     // function pointers
-    PFN_vkCreateDebugUtilsMessengerEXT  create_debug_utils_messenger_ext;
+    PFN_vkCreateDebugUtilsMessengerEXT          CreateDebugUtilsMessengerEXT;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR    fpGetPhysicalDeviceSurfaceSupportKHR;
 
     VkDebugUtilsMessengerEXT dbg_messenger;
 } Demo;
@@ -153,13 +162,15 @@ debug_messenger_callback (
     return false;
 }
 static void
-demo_init (Demo * demo, int w, int h) {
+demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     _ASSERT_EXPR(demo, _T("Invalid demo pointer"));
     memset(demo, 0, sizeof(demo));
     demo->width = w;
     demo->height = h;
     demo->gpu_number = -1;
     demo->cmd_pool = VK_NULL_HANDLE;
+    demo->connection =  win32_hinstance;
+    demo->window = wnd;
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -213,7 +224,12 @@ WinMain (
 
 #pragma region Vulkan Initial Setup
     Demo demo = {0};
-    demo_init(&demo, 500, 500);
+    demo_init(&demo, 500, 500, instance, hwnd);
+
+    //
+    // Init vulkan (demo_init_vk)
+    //
+    ...
     //
     // Init instance
     //
@@ -277,9 +293,9 @@ WinMain (
         );
     }
 // NOTE(omid): VK_EXT_debug_utils extension not enabled yet 
- /*demo.create_debug_utils_messenger_ext =
+ /*demo.CreateDebugUtilsMessengerEXT =
      (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
- err = demo.create_debug_utils_messenger_ext(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
+ err = demo.CreateDebugUtilsMessengerEXT(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
 
     //
     // Enumerate physical devices
@@ -342,21 +358,56 @@ WinMain (
     _ASSERT_EXPR(demo.queue_family_count > 0, "Not enough queue family count");
     demo.queue_props = (VkQueueFamilyProperties *)calloc(demo.queue_family_count, sizeof(VkQueueFamilyProperties));
     vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, demo.queue_props);
+
     //
-    // Search for a graphics in the array of queue families
+    // Init swapchain
     //
+    VkWin32SurfaceCreateInfoKHR surface_info = {0};
+    surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    surface_info.pNext = NULL;
+    surface_info.hinstance = demo.connection;
+    surface_info.hwnd = demo.window;
+    err = vkCreateWin32SurfaceKHR(demo.inst, &surface_info, NULL, &demo.surface);
+    _ASSERT_EXPR(!err, _T("vkCreateWin32SurfaceKHR failed"));
+    VkBool32 * supports_presents = (VkBool32 *)calloc(demo.queue_family_count, sizeof(VkBool32));
+    for (UINT i = 0; i < demo.queue_family_count; ++i) {
+        demo.fpGetPhysicalDeviceSurfaceSupportKHR(demo.gpu, i, demo.surface, &supports_presents[i]);
+    }
+    // Search for a graphics and a present queue in the array of queue
+    // families, try to find one that supports both
     UINT graphics_qfamid = UINT32_MAX;
+    UINT present_qfamid = UINT32_MAX;
     for (UINT i = 0; i < demo.queue_family_count; i++) {
         if ((demo.queue_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
             if (graphics_qfamid == UINT32_MAX) {
                 graphics_qfamid = i;
+            }
+
+            if (supports_presents[i] == VK_TRUE) {
+                graphics_qfamid = i;
+                present_qfamid = i;
                 break;
             }
         }
     }
-    _ASSERT_EXPR(graphics_qfamid != UINT32_MAX, _T("Didnt found graphics queue family index"));
-    demo.graphics_queue_family_index = graphics_qfamid;
+    if (present_qfamid == UINT32_MAX) {
+        // If didn't find a queue that supports both graphics and present, then
+        // find a separate present queue.
+        for (uint32_t i = 0; i < demo.queue_family_count; ++i) {
+            if (supports_presents[i] == VK_TRUE) {
+                present_qfamid = i;
+                break;
+            }
+        }
+    }
+    // Generate error if could not find both a graphics and a present queue
+    if (graphics_qfamid == UINT32_MAX || present_qfamid == UINT32_MAX) {
+        ERREXIT("Could not find both graphics and present queues\n", "Swapchain Initialization Failure");
+    }
 
+    //
+    // Init [Logical] device
+    //
     float queue_priorites[1] = {0.0f};
     VkDeviceQueueCreateInfo queue_info = {0};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -378,6 +429,7 @@ WinMain (
 
     err = vkCreateDevice(demo.gpu, &device_info, NULL, &demo.device);
     _ASSERT_EXPR(!err, _T("vkCreateDevice failed"));
+
     //
     //  Initi command buffer
     //
