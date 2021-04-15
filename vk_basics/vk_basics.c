@@ -51,9 +51,23 @@ static int global_validation_error = 0;
 // Helpers
 #include "utils.h"
 
+#define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                              \
+    {                                                                                                         \
+        demo.fp##entrypoint = (PFN_vk##entrypoint)vkGetInstanceProcAddr(inst, "vk" #entrypoint);             \
+        if (demo.fp##entrypoint == NULL) {                                                                   \
+            ERREXIT("vkGetInstanceProcAddr failed to find vk" #entrypoint, "vkGetInstanceProcAddr Failure"); \
+        }                                                                                                     \
+    }
+
 typedef struct {
     VkInstance                  inst;
     VkDevice                    device;
+
+    bool                        validate;
+    UINT                        enabled_ext_count;
+    UINT                        enabled_layer_count;
+    char *                      ext_names[64];
+    char *                      enabled_layers[64];
 
     VkCommandPool               cmd_pool;
     VkCommandBuffer             cmd_buf;
@@ -161,6 +175,27 @@ debug_messenger_callback (
     // Don't bail out, but keep going.
     return false;
 }
+/*
+ * Return 1 (true) if all layer names specified in check_names
+ * can be found in given layer properties.
+ */
+static VkBool32
+demo_check_layers (UINT check_count, char ** check_names, UINT layer_count, VkLayerProperties * layers) {
+    for (UINT i = 0; i < check_count; i++) {
+        VkBool32 found = 0;
+        for (UINT j = 0; j < layer_count; j++) {
+            if (!strcmp(check_names[i], layers[j].layerName)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "Cannot find layer: %s\n", check_names[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
 static void
 demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     _ASSERT_EXPR(demo, _T("Invalid demo pointer"));
@@ -226,10 +261,81 @@ WinMain (
     Demo demo = {0};
     demo_init(&demo, 500, 500, instance, hwnd);
 
+    VkResult err = VK_NOT_READY;
+    UINT instance_ext_count = 0;
+    UINT instance_layer_count = 0;
+    char * instance_validation_layers [] = {"VK_LAYER_KHRONOS_validation"};
+
     //
-    // Init vulkan (demo_init_vk)
+    // Look for validation layer
     //
-    ...
+    VkBool32 validation_found = 0;
+    if (demo.validate) {
+        err = vkEnumerateInstanceLayerProperties(&instance_layer_count, NULL);
+        _ASSERT_EXPR(!err, _T("vkEnumerateInstanceLayerProperties failed"));
+
+        if (instance_layer_count > 0) {
+            VkLayerProperties * instance_layers = calloc(instance_layer_count, sizeof(VkLayerProperties));
+            err = vkEnumerateInstanceLayerProperties(&instance_layer_count, instance_layers);
+            _ASSERT_EXPR(!err, _T("vkEnumerateInstanceLayerProperties failed"));
+
+            validation_found = demo_check_layers(_countof(instance_validation_layers), instance_validation_layers,
+                                                 instance_layer_count, instance_layers);
+            if (validation_found) {
+                demo.enabled_layer_count = _countof(instance_validation_layers);
+                demo.enabled_layers[0] = "VK_LAYER_KHRONOS_validation";
+            }
+            free(instance_layers);
+        }
+
+        if (!validation_found) {
+            ERREXIT(
+                "vkEnumerateInstanceLayerProperties failed to find required validation layer.\n\n"
+                "Please look at the Getting Started guide for additional information.\n",
+                "vkCreateInstance Failure");
+        }
+    }
+    //
+    // Look for instance extensions
+    //
+    VkBool32 suface_ext_found = 0;
+    VkBool32 platform_surface_ext_found = 0;
+    memset(demo.ext_names, 0, sizeof(demo.ext_names));
+    err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, NULL);
+    _ASSERT_EXPR(!err, _T("vkEnumerateInstanceExtensionProperties failed"));
+    if (instance_ext_count > 0) {
+        VkExtensionProperties * instance_exts = calloc(instance_ext_count, sizeof(VkExtensionProperties));
+        err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, instance_exts);
+        _ASSERT_EXPR(!err, _T("vkEnumerateInstanceExtensionProperties failed"));
+        for (UINT i = 0; i < instance_ext_count; ++i) {
+            if (!strcmp(VK_KHR_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
+                suface_ext_found = 1;
+                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+            }
+            if (!strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
+                platform_surface_ext_found = 1;
+                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+            }
+            if (!strcmp(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, instance_exts[i].extensionName)) {
+                if (demo.validate)
+                    demo.ext_names[demo.enabled_ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+            }
+            _ASSERT_EXPR(demo.enabled_ext_count < 64, _T("Enabled extension counts exceeded upperbound!"));
+        }
+        free(instance_exts);
+    }
+    if (!suface_ext_found) {
+        ERREXIT(
+            "vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_SURFACE_EXTENSION_NAME,
+            "Do u hav a compatible vk icd installed?"
+        );
+    }
+    if (!platform_surface_ext_found) {
+        ERREXIT(
+            "vkEnumerateInstanceExtensionProperties failed to find the " VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+            "Do u hav a compatible vk icd installed?"
+        );
+    }
     //
     // Init instance
     //
@@ -247,15 +353,13 @@ WinMain (
     inst_info.pNext = NULL;
     inst_info.flags = 0;
     inst_info.pApplicationInfo = &app_info;
-    inst_info.enabledLayerCount = 0;
-    inst_info.ppEnabledLayerNames = NULL;
+    inst_info.enabledLayerCount = demo.enabled_layer_count;
+    inst_info.ppEnabledLayerNames = (char const * const *)instance_validation_layers;
     // NOTE(omid): Enabling "VK_EXT_debug_utils" extention 
     /*inst_info.enabledExtensionCount = 1;
     inst_info.ppEnabledExtensionNames = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;*/
-    inst_info.enabledExtensionCount = 0;
-    inst_info.ppEnabledExtensionNames = NULL;
-
-    VkResult err = VK_NOT_READY;
+    inst_info.enabledExtensionCount = demo.enabled_ext_count;
+    inst_info.ppEnabledExtensionNames = (char const * const *)demo.ext_names;
 
     //VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info;
     //// VK_EXT_debug_utils style
@@ -272,14 +376,13 @@ WinMain (
     //inst_info.pNext = &dbg_messenger_create_info;
 
     err = vkCreateInstance(&inst_info, NULL, &demo.inst);
-
     if (err == VK_ERROR_INCOMPATIBLE_DRIVER) {
         ERREXIT(
             "Cannot find a compatible Vulkan installable client driver (ICD)\n"
             "Refer to specs for more info\n",
             "vkCreateInstance failed)"
         );
-    } else if (err) {
+    } else if (err == VK_ERROR_EXTENSION_NOT_PRESENT) {
         ERREXIT(
             "Cannot find a specified extension library.\n"
             "Make sure layer paths are correct\n",
@@ -350,6 +453,8 @@ WinMain (
     }
     free(physical_devices);
 
+
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceSupportKHR);
     // TODO(omid): enumerate device extensions 
 
     // TODO(omid): setup VK_EXT_debug_utils function pointers
