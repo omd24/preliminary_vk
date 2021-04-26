@@ -51,17 +51,20 @@ static int global_validation_error = 0;
 // Helpers
 #include "utils.h"
 
-#define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                              \
-    {                                                                                                         \
-        demo.fp##entrypoint = (PFN_vk##entrypoint)vkGetInstanceProcAddr(inst, "vk" #entrypoint);             \
-        if (demo.fp##entrypoint == NULL) {                                                                   \
-            ERREXIT("vkGetInstanceProcAddr failed to find vk" #entrypoint, "vkGetInstanceProcAddr Failure"); \
-        }                                                                                                     \
+// NOTE(omid): Extension functions are not automatically loaded. We have to look up their address ourselves
+#define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                                \
+    {                                                                                                           \
+        demo.fp##entrypoint = (PFN_vk##entrypoint)vkGetInstanceProcAddr(inst, "vk" #entrypoint);                \
+        if (demo.fp##entrypoint == NULL) {                                                                      \
+            ERREXIT("vkGetInstanceProcAddr failed to find vk" #entrypoint, "vkGetInstanceProcAddr Failure");    \
+        }                                                                                                       \
     }
 
 typedef struct {
     VkInstance                  inst;
-    VkDevice                    device;
+    VkDevice                    device;     // logical device
+    VkPhysicalDevice            gpu;        // physical device
+    int                         gpu_number;
 
     bool                        validate;
     UINT                        enabled_ext_count;
@@ -79,11 +82,11 @@ typedef struct {
 
     VkSurfaceKHR                surface;
 
-    int                         gpu_number;
-    VkPhysicalDevice            gpu;
     UINT                        queue_family_count;
     VkQueueFamilyProperties *   queue_props;
     UINT                        graphics_queue_family_index;
+
+    VkPresentModeKHR            present_mode;
 
     // function pointers
     PFN_vkCreateDebugUtilsMessengerEXT          CreateDebugUtilsMessengerEXT;
@@ -94,39 +97,38 @@ typedef struct {
 
 static VkBool32
 debug_messenger_callback (
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
-    VkDebugUtilsMessengerCallbackDataEXT const * pCallbackData,
-    void * pUserData
+    VkDebugUtilsMessageSeverityFlagBitsEXT msg_severity,
+    VkDebugUtilsMessageTypeFlagsEXT msg_type,
+    VkDebugUtilsMessengerCallbackDataEXT const * cb_ptr,
+    void * user_data
 ) {
     TCHAR prefix[64] = _T("");
-    TCHAR * message = (TCHAR *)malloc(strlen(pCallbackData->pMessage) + 5000);
+    TCHAR * message = (TCHAR *)malloc(strlen(cb_ptr->pMessage) + 5000);
     assert(message);
-    Demo * demo = (Demo *)pUserData;
+    Demo * demo = (Demo *)user_data;
     UNREFERENCED_PARAMETER(demo);
 
-    DebugBreak();
+    //DebugBreak();
 
-
-    if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
+    if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
         _tcscat(prefix, _T("VERBOSE : "));
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
+    } else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
         _tcscat(prefix, _T("INFO : "));
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+    } else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         _tcscat(prefix, _T("WARNING : "));
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+    } else if (msg_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         _tcscat(prefix, _T("ERROR : "));
     }
 
-    if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
+    if (msg_type & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         _tcscat(prefix, _T("GENERAL"));
     } else {
-        if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
+        if (msg_type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
             _tcscat(prefix, _T("VALIDATION"));
             global_validation_error = 1;
         }
-        if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
-            if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
+        if (msg_type & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
+            if (msg_type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
                 _tcscat(prefix, _T("|"));
             }
             _tcscat(prefix, _T("PERFORMANCE"));
@@ -135,35 +137,35 @@ debug_messenger_callback (
 
     _stprintf(
         message, _T("%ls - Message Id Number: %d | Message Id Name: %hs\n\t%hs\n"),
-        prefix, pCallbackData->messageIdNumber,
-        pCallbackData->pMessageIdName, pCallbackData->pMessage
+        prefix, cb_ptr->messageIdNumber,
+        cb_ptr->pMessageIdName, cb_ptr->pMessage
     );
-    if (pCallbackData->objectCount > 0) {
+    if (cb_ptr->objectCount > 0) {
         TCHAR tmp_message[500];
-        _stprintf(tmp_message, _T("\n\tObjects - %d\n"), pCallbackData->objectCount);
+        _stprintf(tmp_message, _T("\n\tObjects - %d\n"), cb_ptr->objectCount);
         _tcscat(message, tmp_message);
-        for (uint32_t object = 0; object < pCallbackData->objectCount; ++object) {
-            if (NULL != pCallbackData->pObjects[object].pObjectName && strlen(pCallbackData->pObjects[object].pObjectName) > 0) {
+        for (uint32_t object = 0; object < cb_ptr->objectCount; ++object) {
+            if (NULL != cb_ptr->pObjects[object].pObjectName && strlen(cb_ptr->pObjects[object].pObjectName) > 0) {
                 _stprintf(tmp_message, _T("\t\tObject[%d] - %hs, Handle %p, Name \"%hs\"\n"), object,
-                          string_VkObjectType(pCallbackData->pObjects[object].objectType),
-                          (void *)(pCallbackData->pObjects[object].objectHandle), pCallbackData->pObjects[object].pObjectName);
+                          string_VkObjectType(cb_ptr->pObjects[object].objectType),
+                          (void *)(cb_ptr->pObjects[object].objectHandle), cb_ptr->pObjects[object].pObjectName);
             } else {
                 _stprintf(tmp_message, _T("\t\tObject[%d] - %hs, Handle %p\n"), object,
-                          string_VkObjectType(pCallbackData->pObjects[object].objectType),
-                          (void *)(pCallbackData->pObjects[object].objectHandle));
+                          string_VkObjectType(cb_ptr->pObjects[object].objectType),
+                          (void *)(cb_ptr->pObjects[object].objectHandle));
             }
             _tcscat(message, tmp_message);
         }
     }
-    if (pCallbackData->cmdBufLabelCount > 0) {
+    if (cb_ptr->cmdBufLabelCount > 0) {
         TCHAR tmp_message[500];
-        _stprintf(tmp_message, _T("\n\tCommand Buffer Labels - %d\n"), pCallbackData->cmdBufLabelCount);
+        _stprintf(tmp_message, _T("\n\tCommand Buffer Labels - %d\n"), cb_ptr->cmdBufLabelCount);
         _tcscat(message, tmp_message);
-        for (uint32_t cmd_buf_label = 0; cmd_buf_label < pCallbackData->cmdBufLabelCount; ++cmd_buf_label) {
+        for (uint32_t cmd_buf_label = 0; cmd_buf_label < cb_ptr->cmdBufLabelCount; ++cmd_buf_label) {
             _stprintf(tmp_message, _T("\t\tLabel[%d] - %hs { %f, %f, %f, %f}\n"), cmd_buf_label,
-                      pCallbackData->pCmdBufLabels[cmd_buf_label].pLabelName, pCallbackData->pCmdBufLabels[cmd_buf_label].color[0],
-                      pCallbackData->pCmdBufLabels[cmd_buf_label].color[1], pCallbackData->pCmdBufLabels[cmd_buf_label].color[2],
-                      pCallbackData->pCmdBufLabels[cmd_buf_label].color[3]);
+                      cb_ptr->pCmdBufLabels[cmd_buf_label].pLabelName, cb_ptr->pCmdBufLabels[cmd_buf_label].color[0],
+                      cb_ptr->pCmdBufLabels[cmd_buf_label].color[1], cb_ptr->pCmdBufLabels[cmd_buf_label].color[2],
+                      cb_ptr->pCmdBufLabels[cmd_buf_label].color[3]);
             _tcscat(message, tmp_message);
         }
     }
@@ -206,6 +208,8 @@ demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     demo->cmd_pool = VK_NULL_HANDLE;
     demo->connection =  win32_hinstance;
     demo->window = wnd;
+    demo->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    demo->validate = true;
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -355,25 +359,28 @@ WinMain (
     inst_info.pApplicationInfo = &app_info;
     inst_info.enabledLayerCount = demo.enabled_layer_count;
     inst_info.ppEnabledLayerNames = (char const * const *)instance_validation_layers;
-    // NOTE(omid): Enabling "VK_EXT_debug_utils" extention 
-    /*inst_info.enabledExtensionCount = 1;
-    inst_info.ppEnabledExtensionNames = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;*/
     inst_info.enabledExtensionCount = demo.enabled_ext_count;
     inst_info.ppEnabledExtensionNames = (char const * const *)demo.ext_names;
 
-    //VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info;
-    //// VK_EXT_debug_utils style
-    //dbg_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    //dbg_messenger_create_info.pNext = NULL;
-    //dbg_messenger_create_info.flags = 0;
-    //dbg_messenger_create_info.messageSeverity =
-    //    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    //dbg_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-    //    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-    //    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-    //dbg_messenger_create_info.pfnUserCallback = debug_messenger_callback;
-    //dbg_messenger_create_info.pUserData = &demo;
-    //inst_info.pNext = &dbg_messenger_create_info;
+    // NOTE(omid): for vkCreateInstance we need a temp callback 
+    // After creating the instance we can register our debug callback
+    // using instance-based function
+
+    VkDebugUtilsMessengerCreateInfoEXT dbg_msg_create_info = {0};
+    if (demo.validate) {
+        dbg_msg_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        dbg_msg_create_info.pNext = NULL;
+        dbg_msg_create_info.flags = 0;
+        dbg_msg_create_info.messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        dbg_msg_create_info.messageType = 
+            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        dbg_msg_create_info.pfnUserCallback = debug_messenger_callback;
+        inst_info.pNext = &dbg_msg_create_info;
+    }
 
     err = vkCreateInstance(&inst_info, NULL, &demo.inst);
     if (err == VK_ERROR_INCOMPATIBLE_DRIVER) {
