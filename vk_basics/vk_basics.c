@@ -65,6 +65,7 @@ typedef struct {
     VkDevice                    device;     // logical device
     VkPhysicalDevice            gpu;        // physical device
     int                         gpu_number;
+    VkPhysicalDeviceProperties  gpu_props;
 
     bool                        validate;
     UINT                        enabled_ext_count;
@@ -88,11 +89,25 @@ typedef struct {
 
     VkPresentModeKHR            present_mode;
 
-    // function pointers
-    PFN_vkCreateDebugUtilsMessengerEXT          CreateDebugUtilsMessengerEXT;
-    PFN_vkGetPhysicalDeviceSurfaceSupportKHR    fpGetPhysicalDeviceSurfaceSupportKHR;
 
     VkDebugUtilsMessengerEXT dbg_messenger;
+
+    // function pointers
+    PFN_vkCreateDebugUtilsMessengerEXT      CreateDebugUtilsMessengerEXT;
+    PFN_vkDestroyDebugUtilsMessengerEXT     DestroyDebugUtilsMessengerEXT;
+    PFN_vkSubmitDebugUtilsMessageEXT        SubmitDebugUtilsMessageEXT;
+    PFN_vkCmdBeginDebugUtilsLabelEXT        CmdBeginDebugUtilsLabelEXT;
+    PFN_vkCmdEndDebugUtilsLabelEXT          CmdEndDebugUtilsLabelEXT;
+    PFN_vkCmdInsertDebugUtilsLabelEXT       CmdInsertDebugUtilsLabelEXT;
+    PFN_vkSetDebugUtilsObjectNameEXT        SetDebugUtilsObjectNameEXT;
+
+
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR        fpGetPhysicalDeviceSurfaceSupportKHR;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR   fpGetPhysicalDeviceSurfaceCapabilitiesKHR;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR        fpGetPhysicalDeviceSurfaceFormatsKHR;
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR   fpGetPhysicalDeviceSurfacePresentModesKHR;
+    PFN_vkGetSwapchainImagesKHR                     fpGetSwapchainImagesKHR;
+
 } Demo;
 
 static VkBool32
@@ -374,7 +389,7 @@ WinMain (
         dbg_msg_create_info.messageSeverity =
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        dbg_msg_create_info.messageType = 
+        dbg_msg_create_info.messageType =
             VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
@@ -402,10 +417,6 @@ WinMain (
             "vkCreateInstance failed"
         );
     }
-// NOTE(omid): VK_EXT_debug_utils extension not enabled yet 
- /*demo.CreateDebugUtilsMessengerEXT =
-     (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
- err = demo.CreateDebugUtilsMessengerEXT(demo.inst, &dbg_messenger_create_info, NULL, &demo.dbg_messenger);*/
 
     //
     // Enumerate physical devices
@@ -460,16 +471,104 @@ WinMain (
     }
     free(physical_devices);
 
+    //
+    // Enumerate device extensions
+    //
+    UINT device_extension_count = 0;
+    VkBool32 swapchain_ext_found = 0;
+    demo.enabled_ext_count = 0;
+    memset(demo.ext_names, 0, sizeof(demo.ext_names));
 
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceSupportKHR);
-    // TODO(omid): enumerate device extensions 
+    err = vkEnumerateDeviceExtensionProperties(demo.gpu, NULL, &device_extension_count, NULL);
+    _ASSERT_EXPR(0 == err, _T("Failed to enumerate device extensions"));
+    if (device_extension_count > 0) {
+        VkExtensionProperties * device_extensions =
+            calloc(device_extension_count, sizeof(VkExtensionProperties));
+        err = vkEnumerateDeviceExtensionProperties(demo.gpu, NULL, &device_extension_count, device_extensions);
+        _ASSERT_EXPR(0 == err, _T("Failed to enumerate device extensions"));
 
-    // TODO(omid): setup VK_EXT_debug_utils function pointers
+        for (UINT i = 0; i < device_extension_count; ++i) {
+            if (0 == strcmp(VK_KHR_SWAPCHAIN_EXTENSION_NAME, device_extensions[i].extensionName)) {
+                swapchain_ext_found = 1;
+                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+            }
+            if (0 == strcmp("VK_KHR_portability_subset", device_extensions[i].extensionName)) {
+                demo.ext_names[demo.enabled_ext_count++] = "VK_KHR_portability_subset";
+            }
+            _ASSERT_EXPR(demo.enabled_ext_count < 64, _T("Invalid enabled ext count"));
+        }
+
+        // TODO(omid): handle other extensions such as
+        //      VK_KHR_incremental_present_enabled,
+        //      VK_GOOGLE_display_timing_enabled
+
+        free(device_extensions);
+    }
+
+    if (0 == swapchain_ext_found)
+        ERREXIT(
+            "vkEnumerateDeviceExtensionProperties failed to find " VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+            "Do u hav a compatible vulkan installable client driver (ICD)?"
+        );
+
+    //
+    // Setup VK_EXT_debug_utils function pointers
+    //
+    if (demo.validate) {
+        demo.CreateDebugUtilsMessengerEXT =
+            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
+        demo.DestroyDebugUtilsMessengerEXT =
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkDestroyDebugUtilsMessengerEXT");
+        demo.SubmitDebugUtilsMessageEXT =
+            (PFN_vkSubmitDebugUtilsMessageEXT)vkGetInstanceProcAddr(demo.inst, "vkSubmitDebugUtilsMessageEXT");
+        demo.CmdBeginDebugUtilsLabelEXT =
+            (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdBeginDebugUtilsLabelEXT");
+        demo.CmdEndDebugUtilsLabelEXT =
+            (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdEndDebugUtilsLabelEXT");
+        demo.CmdInsertDebugUtilsLabelEXT =
+            (PFN_vkCmdInsertDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdInsertDebugUtilsLabelEXT");
+        demo.SetDebugUtilsObjectNameEXT =
+            (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(demo.inst, "vkSetDebugUtilsObjectNameEXT");
+
+        if (
+            NULL == demo.CreateDebugUtilsMessengerEXT || NULL == demo.DestroyDebugUtilsMessengerEXT ||
+            NULL == demo.SubmitDebugUtilsMessageEXT || NULL == demo.CmdBeginDebugUtilsLabelEXT ||
+            NULL == demo.CmdEndDebugUtilsLabelEXT || NULL == demo.CmdInsertDebugUtilsLabelEXT ||
+            NULL == demo.SetDebugUtilsObjectNameEXT
+            ) {
+            ERREXIT("GetProcAddr: Failed to init VK_EXT_debug_utils\n", "GetProcAddr: Failure");
+        }
+
+        err = demo.CreateDebugUtilsMessengerEXT(demo.inst, &dbg_msg_create_info, NULL, &demo.dbg_messenger);
+        switch (err) {
+        case VK_SUCCESS:
+            break;
+        case VK_ERROR_OUT_OF_HOST_MEMORY:
+            ERREXIT("CreateDebugUtilsMessengerEXT: out of host memory\n", "CreateDebugUtilsMessengerEXT Failure");
+            break;
+        default:
+            ERREXIT("CreateDebugUtilsMessengerEXT: unknown failure\n", "CreateDebugUtilsMessengerEXT Failure");
+            break;
+        }
+    }
+    vkGetPhysicalDeviceProperties(demo.gpu, &demo.gpu_props);
 
     vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, NULL);
     _ASSERT_EXPR(demo.queue_family_count > 0, "Not enough queue family count");
     demo.queue_props = (VkQueueFamilyProperties *)calloc(demo.queue_family_count, sizeof(VkQueueFamilyProperties));
     vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, demo.queue_props);
+
+    //
+    // Query feature support for device (if needed)
+    //
+    VkPhysicalDeviceFeatures physDevFeatures;
+    vkGetPhysicalDeviceFeatures(demo.gpu, &physDevFeatures);
+
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceSupportKHR);
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceFormatsKHR);
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfacePresentModesKHR);
+    GET_INSTANCE_PROC_ADDR(demo.inst, GetSwapchainImagesKHR);
 
     //
     // Init swapchain
