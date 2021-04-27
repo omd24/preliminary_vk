@@ -51,6 +51,9 @@ static int global_validation_error = 0;
 // Helpers
 #include "utils.h"
 
+// Allow a maximum of two outstanding presentation operations.
+#define FRAME_LAG 2
+
 // NOTE(omid): Extension functions are not automatically loaded. We have to look up their address ourselves
 #define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                                \
     {                                                                                                           \
@@ -58,6 +61,17 @@ static int global_validation_error = 0;
         if (demo.fp##entrypoint == NULL) {                                                                      \
             ERREXIT("vkGetInstanceProcAddr failed to find vk" #entrypoint, "vkGetInstanceProcAddr Failure");    \
         }                                                                                                       \
+    }
+
+static PFN_vkGetDeviceProcAddr g_gdpa = NULL;
+
+#define GET_DEVICE_PROC_ADDR(dev, entrypoint)                                                                    \
+    {                                                                                                            \
+        if (!g_gdpa) g_gdpa = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(demo.inst, "vkGetDeviceProcAddr"); \
+        demo.fp##entrypoint = (PFN_vk##entrypoint)g_gdpa(dev, "vk" #entrypoint);                                \
+        if (demo.fp##entrypoint == NULL) {                                                                      \
+            ERREXIT("vkGetDeviceProcAddr failed to find vk" #entrypoint, "vkGetDeviceProcAddr Failure");        \
+        }                                                                                                        \
     }
 
 typedef struct {
@@ -80,19 +94,30 @@ typedef struct {
     int                         height;
     HINSTANCE                   connection;
     HWND                        window;
+    VkFormat                    format;
+    VkColorSpaceKHR             color_space;
 
     VkSurfaceKHR                surface;
 
     UINT                        queue_family_count;
     VkQueueFamilyProperties *   queue_props;
-    UINT                        graphics_queue_family_index;
-
+    VkQueue                     graphics_queue;
+    VkQueue                     present_queue;
+    uint32_t                    graphics_queue_family_index;
+    uint32_t                    present_queue_family_index;
+    bool                        separate_present_queue;
     VkPresentModeKHR            present_mode;
 
 
+    VkSemaphore                 image_acquired_semaphores[FRAME_LAG];
+    VkSemaphore                 draw_complete_semaphores[FRAME_LAG];
+    VkSemaphore                 image_ownership_semaphores[FRAME_LAG];
+
+    VkPhysicalDeviceMemoryProperties memory_properties;
+
     VkDebugUtilsMessengerEXT dbg_messenger;
 
-    // function pointers
+    // function pointers for debug utils stuff
     PFN_vkCreateDebugUtilsMessengerEXT      CreateDebugUtilsMessengerEXT;
     PFN_vkDestroyDebugUtilsMessengerEXT     DestroyDebugUtilsMessengerEXT;
     PFN_vkSubmitDebugUtilsMessageEXT        SubmitDebugUtilsMessageEXT;
@@ -101,13 +126,23 @@ typedef struct {
     PFN_vkCmdInsertDebugUtilsLabelEXT       CmdInsertDebugUtilsLabelEXT;
     PFN_vkSetDebugUtilsObjectNameEXT        SetDebugUtilsObjectNameEXT;
 
-
+    // function pointers for gpu / instance-based stuff
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR        fpGetPhysicalDeviceSurfaceSupportKHR;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR   fpGetPhysicalDeviceSurfaceCapabilitiesKHR;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR        fpGetPhysicalDeviceSurfaceFormatsKHR;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR   fpGetPhysicalDeviceSurfacePresentModesKHR;
-    PFN_vkGetSwapchainImagesKHR                     fpGetSwapchainImagesKHR;
 
+    // function pointers for [logical] device stuff
+    PFN_vkCreateSwapchainKHR fpCreateSwapchainKHR;
+    PFN_vkDestroySwapchainKHR fpDestroySwapchainKHR;
+    PFN_vkGetSwapchainImagesKHR fpGetSwapchainImagesKHR;
+    PFN_vkAcquireNextImageKHR fpAcquireNextImageKHR;
+    PFN_vkQueuePresentKHR fpQueuePresentKHR;
+
+    VkFence fences[FRAME_LAG];
+    int frame_index;
+    UINT cur_frame;
+    UINT frame_count;
 } Demo;
 
 static VkBool32
@@ -212,6 +247,28 @@ demo_check_layers (UINT check_count, char ** check_names, UINT layer_count, VkLa
         }
     }
     return 1;
+}
+static VkSurfaceFormatKHR
+select_surface_format(VkSurfaceFormatKHR *surface_formats, uint32_t count) {
+    VkSurfaceFormatKHR ret = surface_formats[0];
+    _ASSERT_EXPR(count > 0, "format count must be greater than 0");
+    // Prefer non-SRGB formats...
+    for (uint32_t i = 0; i < count; i++) {
+        const VkFormat format = surface_formats[i].format;
+
+        if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM ||
+            format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ||
+            format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+            ret = surface_formats[i];
+            break;
+        }
+    }
+
+    // NOTE(omid): 
+    // if can't find our preferred formats, we will use the first exposed format.
+    // in that case rendering may be incorrect
+
+    return ret;
 }
 static void
 demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
@@ -327,17 +384,20 @@ WinMain (
         err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, instance_exts);
         _ASSERT_EXPR(!err, _T("vkEnumerateInstanceExtensionProperties failed"));
         for (UINT i = 0; i < instance_ext_count; ++i) {
-            if (!strcmp(VK_KHR_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
+            if (0 == strcmp(VK_KHR_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 suface_ext_found = 1;
                 demo.ext_names[demo.enabled_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
             }
-            if (!strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
+            if (0 == strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 platform_surface_ext_found = 1;
                 demo.ext_names[demo.enabled_ext_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
             }
-            if (!strcmp(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, instance_exts[i].extensionName)) {
+            if (0 == strcmp(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 if (demo.validate)
                     demo.ext_names[demo.enabled_ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+            }
+            if (0 == strcmp(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, instance_exts[i].extensionName)) {
+                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
             }
             _ASSERT_EXPR(demo.enabled_ext_count < 64, _T("Enabled extension counts exceeded upperbound!"));
         }
@@ -570,6 +630,7 @@ WinMain (
     GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfacePresentModesKHR);
     GET_INSTANCE_PROC_ADDR(demo.inst, GetSwapchainImagesKHR);
 
+#pragma region Init Swapchain
     //
     // Init swapchain
     //
@@ -579,7 +640,7 @@ WinMain (
     surface_info.hinstance = demo.connection;
     surface_info.hwnd = demo.window;
     err = vkCreateWin32SurfaceKHR(demo.inst, &surface_info, NULL, &demo.surface);
-    _ASSERT_EXPR(!err, _T("vkCreateWin32SurfaceKHR failed"));
+    _ASSERT_EXPR(0 == err, _T("vkCreateWin32SurfaceKHR failed"));
     VkBool32 * supports_presents = (VkBool32 *)calloc(demo.queue_family_count, sizeof(VkBool32));
     for (UINT i = 0; i < demo.queue_family_count; ++i) {
         demo.fpGetPhysicalDeviceSurfaceSupportKHR(demo.gpu, i, demo.surface, &supports_presents[i]);
@@ -616,8 +677,13 @@ WinMain (
         ERREXIT("Could not find both graphics and present queues\n", "Swapchain Initialization Failure");
     }
 
+    demo.graphics_queue_family_index = graphics_qfamid;
+    demo.present_queue_family_index = present_qfamid;
+    demo.separate_present_queue = (demo.graphics_queue_family_index != demo.present_queue_family_index);
+    free(supports_presents);
+
     //
-    // Init [Logical] device
+    // Create [Logical] device
     //
     float queue_priorites[1] = {0.0f};
     VkDeviceQueueCreateInfo queue_info = {0};
@@ -632,15 +698,74 @@ WinMain (
     device_info.pNext = NULL;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
-    device_info.enabledExtensionCount = 0;
-    device_info.ppEnabledExtensionNames = NULL;
+    device_info.enabledExtensionCount = demo.enabled_ext_count;
+    device_info.ppEnabledExtensionNames = (char const * const *)demo.ext_names;
     device_info.enabledLayerCount = 0;
     device_info.ppEnabledLayerNames = NULL;
     device_info.pEnabledFeatures = NULL;
 
     err = vkCreateDevice(demo.gpu, &device_info, NULL, &demo.device);
-    _ASSERT_EXPR(!err, _T("vkCreateDevice failed"));
+    _ASSERT_EXPR(0 == err, _T("vkCreateDevice failed"));
 
+    GET_DEVICE_PROC_ADDR(demo.device, CreateSwapchainKHR);
+    GET_DEVICE_PROC_ADDR(demo.device, DestroySwapchainKHR);
+    GET_DEVICE_PROC_ADDR(demo.device, GetSwapchainImagesKHR);
+    GET_DEVICE_PROC_ADDR(demo.device, AcquireNextImageKHR);
+    GET_DEVICE_PROC_ADDR(demo.device, QueuePresentKHR);
+
+    vkGetDeviceQueue(demo.device, demo.graphics_queue_family_index, 0, &demo.graphics_queue);
+
+    if (!demo.separate_present_queue)
+        demo.present_queue = demo.graphics_queue;
+    else
+        vkGetDeviceQueue(demo.device, demo.present_queue_family_index, 0, &demo.present_queue);
+
+    // -- get a list of VkFormat's that are supported:
+    UINT format_count;
+    err = demo.fpGetPhysicalDeviceSurfaceFormatsKHR(demo.gpu, demo.surface, &format_count, NULL);
+    _ASSERT_EXPR(0 == err, _T("fpGetPhysicalDeviceSurfaceFormatsKHR failed"));
+    VkSurfaceFormatKHR * surface_formats = (VkSurfaceFormatKHR *)calloc(format_count, sizeof(VkSurfaceFormatKHR));
+    err = demo.fpGetPhysicalDeviceSurfaceFormatsKHR(demo.gpu, demo.surface, &format_count, surface_formats);
+    _ASSERT_EXPR(0 == err, _T("fpGetPhysicalDeviceSurfaceFormatsKHR failed"));
+    VkSurfaceFormatKHR selected_format = select_surface_format(surface_formats, format_count);
+    demo.format = selected_format.format;
+    demo.color_space = selected_format.colorSpace;
+    free(surface_formats);
+
+    demo.cur_frame = 0;
+
+    // -- create semaphores to synchronize acquiring presentable buffers before
+    //    rendering and waiting for drawing to be complete before presenting
+    VkSemaphoreCreateInfo semaphore_ci = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+    };
+
+    // -- create fences that we can use to throttle if we get too far
+    //    ahead of the image presents
+    VkFenceCreateInfo fence_ci = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+    for (uint32_t i = 0; i < FRAME_LAG; i++) {
+        err = vkCreateFence(demo.device, &fence_ci, NULL, &demo.fences[i]);
+        assert(!err);
+
+        err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_acquired_semaphores[i]);
+        assert(!err);
+
+        err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.draw_complete_semaphores[i]);
+        assert(!err);
+
+        if (demo.separate_present_queue) {
+            err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_ownership_semaphores[i]);
+            assert(!err);
+        }
+    }
+    demo.frame_index = 0;
+
+    // -- get Memory information and properties
+    vkGetPhysicalDeviceMemoryProperties(demo.gpu, &demo.memory_properties);
+#pragma endregion
     //
     //  Initi command buffer
     //
