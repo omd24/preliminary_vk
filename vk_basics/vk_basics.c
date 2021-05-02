@@ -18,7 +18,6 @@
 #include <tchar.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <assert.h>
 
 // _ASSERT_EXPR macro
 #include <crtdbg.h>
@@ -75,6 +74,17 @@ static PFN_vkGetDeviceProcAddr g_gdpa = NULL;
     }
 
 typedef struct {
+    VkImage image;
+    VkCommandBuffer cmd;
+    VkCommandBuffer graphics_to_present_cmd;
+    VkImageView view;
+    VkBuffer uniform_buffer;
+    VkDeviceMemory uniform_memory;
+    void * uniform_memory_ptr;
+    VkFramebuffer framebuffer;
+    VkDescriptorSet descriptor_set;
+} SwapchainImageResources;
+typedef struct {
     VkInstance                  inst;
     VkDevice                    device;     // logical device
     VkPhysicalDevice            gpu;        // physical device
@@ -107,6 +117,15 @@ typedef struct {
     uint32_t                    present_queue_family_index;
     bool                        separate_present_queue;
     VkPresentModeKHR            present_mode;
+    VkSwapchainKHR              swapchain;
+    SwapchainImageResources *   swapchain_image_resources;
+    UINT                        swapchain_image_count;
+    bool                        is_minimized;
+
+    VkFence                     fences[FRAME_LAG];
+    int                         frame_index;
+    UINT                        cur_frame;
+    UINT                        frame_count;
 
 
     VkSemaphore                 image_acquired_semaphores[FRAME_LAG];
@@ -139,10 +158,7 @@ typedef struct {
     PFN_vkAcquireNextImageKHR fpAcquireNextImageKHR;
     PFN_vkQueuePresentKHR fpQueuePresentKHR;
 
-    VkFence fences[FRAME_LAG];
-    int frame_index;
-    UINT cur_frame;
-    UINT frame_count;
+
 } Demo;
 
 static VkBool32
@@ -154,7 +170,6 @@ debug_messenger_callback (
 ) {
     TCHAR prefix[64] = _T("");
     TCHAR * message = (TCHAR *)malloc(strlen(cb_ptr->pMessage) + 5000);
-    assert(message);
     Demo * demo = (Demo *)user_data;
     UNREFERENCED_PARAMETER(demo);
 
@@ -283,6 +298,215 @@ demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     demo->present_mode = VK_PRESENT_MODE_FIFO_KHR;
     demo->validate = true;
 }
+static void
+build_backbuffers (Demo * demo) {
+    VkResult err;
+    VkSwapchainKHR swapchain_old = demo->swapchain;
+
+    // Check the surface capabilities and formats
+    VkSurfaceCapabilitiesKHR surf_capabilities;
+    err = demo->fpGetPhysicalDeviceSurfaceCapabilitiesKHR(demo->gpu, demo->surface, &surf_capabilities);
+    _ASSERT_EXPR(0 == err, "failed checking the surface capabilities");
+
+    uint32_t present_mode_count;
+    err = demo->fpGetPhysicalDeviceSurfacePresentModesKHR(demo->gpu, demo->surface, &present_mode_count, NULL);
+    _ASSERT_EXPR(0 == err, "failed to get surface present modes");
+    VkPresentModeKHR * present_modes = (VkPresentModeKHR *)malloc(present_mode_count * sizeof(VkPresentModeKHR));
+    err = demo->fpGetPhysicalDeviceSurfacePresentModesKHR(demo->gpu, demo->surface, &present_mode_count, present_modes);
+    _ASSERT_EXPR(0 == err, "failed to get surface present modes");
+
+    VkExtent2D swapchain_extent;
+    // width and height are either both 0xFFFFFFFF, or both not 0xFFFFFFFF.
+    if (surf_capabilities.currentExtent.width == 0xFFFFFFFF) {
+        // If the surface size is undefined, the size is set to the size
+        // of the images requested, which must fit within the minimum and
+        // maximum values.
+        swapchain_extent.width = demo->width;
+        swapchain_extent.height = demo->height;
+
+        if (swapchain_extent.width < surf_capabilities.minImageExtent.width) {
+            swapchain_extent.width = surf_capabilities.minImageExtent.width;
+        } else if (swapchain_extent.width > surf_capabilities.maxImageExtent.width) {
+            swapchain_extent.width = surf_capabilities.maxImageExtent.width;
+        }
+
+        if (swapchain_extent.height < surf_capabilities.minImageExtent.height) {
+            swapchain_extent.height = surf_capabilities.minImageExtent.height;
+        } else if (swapchain_extent.height > surf_capabilities.maxImageExtent.height) {
+            swapchain_extent.height = surf_capabilities.maxImageExtent.height;
+        }
+    } else {
+        // If the surface size is defined, the swap chain size must match
+        swapchain_extent = surf_capabilities.currentExtent;
+        demo->width = surf_capabilities.currentExtent.width;
+        demo->height = surf_capabilities.currentExtent.height;
+    }
+
+    if (demo->width == 0 || demo->height == 0) {
+        demo->is_minimized = true;
+        return;
+    } else {
+        demo->is_minimized = false;
+    }
+
+    // The FIFO present mode is guaranteed by the spec to be supported
+    // and to have no tearing.  It's a great default present mode to use.
+    VkPresentModeKHR swapchain_present_mode = VK_PRESENT_MODE_FIFO_KHR;
+
+    //  There are times when you may wish to use another present mode.  The
+    //  following code shows how to select them, and the comments provide some
+    //  reasons you may wish to use them.
+    //
+    // It should be noted that Vulkan 1.0 doesn't provide a method for
+    // synchronizing rendering with the presentation engine's display.  There
+    // is a method provided for throttling rendering with the display, but
+    // there are some presentation engines for which this method will not work.
+    // If an application doesn't throttle its rendering, and if it renders much
+    // faster than the refresh rate of the display, this can waste power on
+    // mobile devices.  That is because power is being spent rendering images
+    // that may never be seen.
+
+    // VK_PRESENT_MODE_IMMEDIATE_KHR is for applications that don't care about
+    // tearing, or have some way of synchronizing their rendering with the
+    // display.
+    // VK_PRESENT_MODE_MAILBOX_KHR may be useful for applications that
+    // generally render a new presentable image every refresh cycle, but are
+    // occasionally early.  In this case, the application wants the new image
+    // to be displayed instead of the previously-queued-for-presentation image
+    // that has not yet been displayed.
+    // VK_PRESENT_MODE_FIFO_RELAXED_KHR is for applications that generally
+    // render a new presentable image every refresh cycle, but are occasionally
+    // late.  In this case (perhaps because of stuttering/latency concerns),
+    // the application wants the late image to be immediately displayed, even
+    // though that may mean some tearing.
+
+    if (demo->present_mode != swapchain_present_mode) {
+        for (size_t i = 0; i < present_mode_count; ++i) {
+            if (present_modes[i] == demo->present_mode) {
+                swapchain_present_mode = demo->present_mode;
+                break;
+            }
+        }
+    }
+    if (swapchain_present_mode != demo->present_mode) {
+        ERREXIT("Present mode specified is not supported\n", "Present mode unsupported");
+    }
+
+    // Determine the number of VkImages to use in the swap chain.
+    // Application desires to acquire 3 images at a time for triple
+    // buffering
+    uint32_t desired_swapchain_image_count = 3;
+    if (desired_swapchain_image_count < surf_capabilities.minImageCount) {
+        desired_swapchain_image_count = surf_capabilities.minImageCount;
+    }
+    // If maxImageCount is 0, we can ask for as many images as we want;
+    // otherwise we're limited to maxImageCount
+    if ((surf_capabilities.maxImageCount > 0) && (desired_swapchain_image_count > surf_capabilities.maxImageCount)) {
+        // Application must settle for fewer images than desired:
+        desired_swapchain_image_count = surf_capabilities.maxImageCount;
+    }
+
+    VkSurfaceTransformFlagsKHR surf_transform;
+    if (surf_capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        surf_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    } else {
+        surf_transform = surf_capabilities.currentTransform;
+    }
+
+    // Find a supported composite alpha mode - one of these is guaranteed to be set
+    VkCompositeAlphaFlagBitsKHR composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    VkCompositeAlphaFlagBitsKHR composite_alpha_flags[4] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+    };
+    for (uint32_t i = 0; i < _countof(composite_alpha_flags); i++) {
+        if (surf_capabilities.supportedCompositeAlpha & composite_alpha_flags[i]) {
+            composite_alpha = composite_alpha_flags[i];
+            break;
+        }
+    }
+
+    VkSwapchainCreateInfoKHR swapchain_ci = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = NULL,
+        .surface = demo->surface,
+        .minImageCount = desired_swapchain_image_count,
+        .imageFormat = demo->format,
+        .imageColorSpace = demo->color_space,
+        .imageExtent =
+            {
+                .width = swapchain_extent.width,
+                .height = swapchain_extent.height,
+            },
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .preTransform = surf_transform,
+        .compositeAlpha = composite_alpha,
+        .imageArrayLayers = 1,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = NULL,
+        .presentMode = swapchain_present_mode,
+        .oldSwapchain = swapchain_old,
+        .clipped = true,
+    };
+    uint32_t i;
+    err = demo->fpCreateSwapchainKHR(demo->device, &swapchain_ci, NULL, &demo->swapchain);
+    _ASSERT_EXPR(0 == err, "failed to create swapchain");
+
+    // If we just re-created an existing swapchain, we should destroy the old
+    // swapchain at this point.
+    // Note: destroying the swapchain also cleans up all its associated
+    // presentable images once the platform is done with them.
+    if (swapchain_old != VK_NULL_HANDLE) {
+        demo->fpDestroySwapchainKHR(demo->device, swapchain_old, NULL);
+    }
+
+    err = demo->fpGetSwapchainImagesKHR(demo->device, demo->swapchain, &demo->swapchain_image_count, NULL);
+    _ASSERT_EXPR(0 == err, "failed to get swapchain images");
+
+    VkImage * swapchain_images = (VkImage *)malloc(demo->swapchain_image_count * sizeof(VkImage));
+    err = demo->fpGetSwapchainImagesKHR(demo->device, demo->swapchain, &demo->swapchain_image_count, swapchain_images);
+    _ASSERT_EXPR(0 == err, "failed to get swapchain images");
+
+    demo->swapchain_image_resources =
+        (SwapchainImageResources *)malloc(sizeof(SwapchainImageResources) * demo->swapchain_image_count);
+
+    for (i = 0; i < demo->swapchain_image_count; i++) {
+        VkImageViewCreateInfo color_image_view = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = NULL,
+            .format = demo->format,
+            .components =
+                {
+                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+            .subresourceRange =
+                {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .flags = 0,
+        };
+
+        demo->swapchain_image_resources[i].image = swapchain_images[i];
+
+        color_image_view.image = demo->swapchain_image_resources[i].image;
+
+        err = vkCreateImageView(demo->device, &color_image_view, NULL, &demo->swapchain_image_resources[i].view);
+        _ASSERT_EXPR(0 == err, "failed to create image view");
+    }
+
+    if (NULL != swapchain_images) {
+        free(swapchain_images);
+    }
+
+    if (NULL != present_modes) {
+        free(present_modes);
+    }
+}
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -348,12 +572,12 @@ WinMain (
     VkBool32 validation_found = 0;
     if (demo.validate) {
         err = vkEnumerateInstanceLayerProperties(&instance_layer_count, NULL);
-        _ASSERT_EXPR(!err, _T("vkEnumerateInstanceLayerProperties failed"));
+        _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceLayerProperties failed"));
 
         if (instance_layer_count > 0) {
             VkLayerProperties * instance_layers = calloc(instance_layer_count, sizeof(VkLayerProperties));
             err = vkEnumerateInstanceLayerProperties(&instance_layer_count, instance_layers);
-            _ASSERT_EXPR(!err, _T("vkEnumerateInstanceLayerProperties failed"));
+            _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceLayerProperties failed"));
 
             validation_found = demo_check_layers(_countof(instance_validation_layers), instance_validation_layers,
                                                  instance_layer_count, instance_layers);
@@ -378,11 +602,11 @@ WinMain (
     VkBool32 platform_surface_ext_found = 0;
     memset(demo.ext_names, 0, sizeof(demo.ext_names));
     err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, NULL);
-    _ASSERT_EXPR(!err, _T("vkEnumerateInstanceExtensionProperties failed"));
+    _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceExtensionProperties failed"));
     if (instance_ext_count > 0) {
         VkExtensionProperties * instance_exts = calloc(instance_ext_count, sizeof(VkExtensionProperties));
         err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, instance_exts);
-        _ASSERT_EXPR(!err, _T("vkEnumerateInstanceExtensionProperties failed"));
+        _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceExtensionProperties failed"));
         for (UINT i = 0; i < instance_ext_count; ++i) {
             if (0 == strcmp(VK_KHR_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 suface_ext_found = 1;
@@ -487,7 +711,7 @@ WinMain (
         ERREXIT("vkEnumeratePhysicalDevices reported zero device??\n", "vkEnumeratePhysicalDevices failed");
     VkPhysicalDevice * physical_devices = (VkPhysicalDevice *)calloc(gpu_count, sizeof(VkPhysicalDevice));
     err = vkEnumeratePhysicalDevices(demo.inst, &gpu_count, physical_devices);
-    _ASSERT_EXPR(!err, _T("Filling physical_devices array failed"));
+    _ASSERT_EXPR(0 == err, _T("Filling physical_devices array failed"));
 
     //
     // Auto-select suitable device
@@ -748,17 +972,17 @@ WinMain (
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     for (uint32_t i = 0; i < FRAME_LAG; i++) {
         err = vkCreateFence(demo.device, &fence_ci, NULL, &demo.fences[i]);
-        assert(!err);
+        _ASSERT_EXPR(0 == err, "vkCreateFence failed");
 
         err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_acquired_semaphores[i]);
-        assert(!err);
+        _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
 
         err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.draw_complete_semaphores[i]);
-        assert(!err);
+        _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
 
         if (demo.separate_present_queue) {
             err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_ownership_semaphores[i]);
-            assert(!err);
+            _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
         }
     }
     demo.frame_index = 0;
@@ -770,32 +994,34 @@ WinMain (
     //  Initi command buffer
     //
     if (demo.cmd_pool == VK_NULL_HANDLE) {
-        VkCommandPoolCreateInfo pool_info = {0};
-        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pool_info.pNext = NULL;
-        pool_info.queueFamilyIndex = demo.graphics_queue_family_index;
-        pool_info.flags = 0;
-        err = vkCreateCommandPool(demo.device, &pool_info, NULL, &demo.cmd_pool);
-        _ASSERT_EXPR(!err, _T("vkCreateCommandPool failed"));
+        VkCommandPoolCreateInfo pool_ci = {0};
+        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_ci.pNext = NULL;
+        pool_ci.queueFamilyIndex = demo.graphics_queue_family_index;
+        pool_ci.flags = 0;
+        err = vkCreateCommandPool(demo.device, &pool_ci, NULL, &demo.cmd_pool);
+        _ASSERT_EXPR(0 == err, _T("vkCreateCommandPool failed"));
     }
-    VkCommandBufferAllocateInfo cmd_buf_alloc_info = {0};
-    cmd_buf_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_buf_alloc_info.pNext = NULL;
-    cmd_buf_alloc_info.commandPool = demo.cmd_pool;
-    cmd_buf_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_buf_alloc_info.commandBufferCount = 1;
-    err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_info, &demo.cmd_buf);
-    _ASSERT_EXPR(!err, _T("vkAllocateCommandBuffers failed"));
+    VkCommandBufferAllocateInfo cmd_buf_alloc_ci = {0};
+    cmd_buf_alloc_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_buf_alloc_ci.pNext = NULL;
+    cmd_buf_alloc_ci.commandPool = demo.cmd_pool;
+    cmd_buf_alloc_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_buf_alloc_ci.commandBufferCount = 1;
+    err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_ci, &demo.cmd_buf);
+    _ASSERT_EXPR(0 == err, _T("vkAllocateCommandBuffers failed"));
 
-    VkCommandBufferBeginInfo cmd_buf_begin_info = {0};
-    cmd_buf_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    cmd_buf_begin_info.pNext = NULL;
-    cmd_buf_begin_info.flags = 0;
-    cmd_buf_begin_info.pInheritanceInfo = NULL;
-    err = vkBeginCommandBuffer(demo.cmd_buf, &cmd_buf_begin_info);
-    _ASSERT_EXPR(!err, _T("vkBeginCommandBuffer failed"));
+    VkCommandBufferBeginInfo cmd_buf_begin_ci = {0};
+    cmd_buf_begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cmd_buf_begin_ci.pNext = NULL;
+    cmd_buf_begin_ci.flags = 0;
+    cmd_buf_begin_ci.pInheritanceInfo = NULL;
+    err = vkBeginCommandBuffer(demo.cmd_buf, &cmd_buf_begin_ci);
+    _ASSERT_EXPR(0 == err, _T("vkBeginCommandBuffer failed"));
 
 #pragma endregion
+
+    build_backbuffers(&demo);
 
 #pragma region Main Loop
     // Run the message loop.
