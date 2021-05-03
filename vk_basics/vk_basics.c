@@ -127,6 +127,13 @@ typedef struct {
     UINT                        cur_frame;
     UINT                        frame_count;
 
+    struct {
+        VkFormat                format;
+        VkImage                 image;
+        VkMemoryAllocateInfo    mem_alloc;
+        VkDeviceMemory          mem;
+        VkImageView view;
+    } depth;
 
     VkSemaphore                 image_acquired_semaphores[FRAME_LAG];
     VkSemaphore                 draw_complete_semaphores[FRAME_LAG];
@@ -466,7 +473,7 @@ build_backbuffers (Demo * demo) {
     err = demo->fpGetSwapchainImagesKHR(demo->device, demo->swapchain, &demo->swapchain_image_count, NULL);
     _ASSERT_EXPR(0 == err, "failed to get swapchain images");
 
-    VkImage * swapchain_images = (VkImage *)malloc(demo->swapchain_image_count * sizeof(VkImage));
+    VkImage * swapchain_images = (VkImage *)calloc(demo->swapchain_image_count, sizeof(VkImage));
     err = demo->fpGetSwapchainImagesKHR(demo->device, demo->swapchain, &demo->swapchain_image_count, swapchain_images);
     _ASSERT_EXPR(0 == err, "failed to get swapchain images");
 
@@ -506,6 +513,89 @@ build_backbuffers (Demo * demo) {
     if (NULL != present_modes) {
         free(present_modes);
     }
+}
+static bool
+memory_type_from_properties (
+    Demo * demo,
+    uint32_t type_bits,
+    VkFlags requirements_mask,
+    uint32_t * type_index
+) {
+    // Search memtypes to find first index with those properties
+    for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; i++) {
+        if ((type_bits & 1) == 1) {
+            // Type is available, does it match user properties?
+            if ((demo->memory_properties.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask) {
+                *type_index = i;
+                return true;
+            }
+        }
+        type_bits >>= 1;
+    }
+    // No memory types matched, return failure
+    return false;
+}
+static void
+build_depthbuffer (Demo * demo) {
+    VkFormat depth_format = VK_FORMAT_D16_UNORM;
+    VkImageCreateInfo image_ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = NULL,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = depth_format,
+        .extent = {demo->width, demo->height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .flags = 0,
+    };
+    VkImageViewCreateInfo view_ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = NULL,
+        .image = VK_NULL_HANDLE,
+        .format = depth_format,
+        .subresourceRange =
+            {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+        .flags = 0,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+    };
+    VkMemoryRequirements mem_reqs;
+    VkResult err;
+    bool pass;
+
+    demo->depth.format = depth_format;
+
+    // -- create image
+    err = vkCreateImage(demo->device, &image_ci, NULL, &demo->depth.image);
+    _ASSERT_EXPR(0 == err, "vkCreateImage failed");
+
+
+    // -- allocate memory
+    vkGetImageMemoryRequirements(demo->device, demo->depth.image, &mem_reqs);
+    demo->depth.mem_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    demo->depth.mem_alloc.pNext = NULL;
+    demo->depth.mem_alloc.allocationSize = mem_reqs.size;
+    demo->depth.mem_alloc.memoryTypeIndex = 0;
+    pass = memory_type_from_properties(
+        demo,
+        mem_reqs.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &demo->depth.mem_alloc.memoryTypeIndex
+    );
+    _ASSERT_EXPR(pass, "could not find memory type index");
+    err = vkAllocateMemory(demo->device, &demo->depth.mem_alloc, NULL, &demo->depth.mem);
+    _ASSERT_EXPR(0 == err, "vkAllocateMemory failed");
+
+    // -- bind memory
+    err = vkBindImageMemory(demo->device, demo->depth.image, demo->depth.mem, 0);
+    _ASSERT_EXPR(0 == err, "vkBindeImageMemory Failed");
+
+    // -- create image view
+    view_ci.image = demo->depth.image;
+    err = vkCreateImageView(demo->device, &view_ci, NULL, &demo->depth.view);
+    _ASSERT_EXPR(0 == err, "vkCreateImageView failed");
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -1022,6 +1112,8 @@ WinMain (
 #pragma endregion
 
     build_backbuffers(&demo);
+
+    build_depthbuffer(&demo);
 
 #pragma region Main Loop
     // Run the message loop.
