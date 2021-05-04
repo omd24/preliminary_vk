@@ -49,9 +49,12 @@ static int global_validation_error = 0;
 
 // Helpers
 #include "utils.h"
+#include "linmath.h"
 
 // Allow a maximum of two outstanding presentation operations.
 #define FRAME_LAG 2
+
+#define _TEXTURE_COUNT 1
 
 // NOTE(omid): Extension functions are not automatically loaded. We have to look up their address ourselves
 #define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                                \
@@ -73,6 +76,104 @@ static PFN_vkGetDeviceProcAddr g_gdpa = NULL;
         }                                                                                                        \
     }
 
+// TODO(omid): Remove all this global hard-coded data stuff 
+#pragma region Global Data
+//--------------------------------------------------------------------------------------
+// Mesh and VertexFormat Data
+//--------------------------------------------------------------------------------------
+// clang-format off
+static const float g_vertex_buffer_data [] = {
+    -1.0f,-1.0f,-1.0f,  // -X side
+    -1.0f,-1.0f, 1.0f,
+    -1.0f, 1.0f, 1.0f,
+    -1.0f, 1.0f, 1.0f,
+    -1.0f, 1.0f,-1.0f,
+    -1.0f,-1.0f,-1.0f,
+
+    -1.0f,-1.0f,-1.0f,  // -Z side
+     1.0f, 1.0f,-1.0f,
+     1.0f,-1.0f,-1.0f,
+    -1.0f,-1.0f,-1.0f,
+    -1.0f, 1.0f,-1.0f,
+     1.0f, 1.0f,-1.0f,
+
+    -1.0f,-1.0f,-1.0f,  // -Y side
+     1.0f,-1.0f,-1.0f,
+     1.0f,-1.0f, 1.0f,
+    -1.0f,-1.0f,-1.0f,
+     1.0f,-1.0f, 1.0f,
+    -1.0f,-1.0f, 1.0f,
+
+    -1.0f, 1.0f,-1.0f,  // +Y side
+    -1.0f, 1.0f, 1.0f,
+     1.0f, 1.0f, 1.0f,
+    -1.0f, 1.0f,-1.0f,
+     1.0f, 1.0f, 1.0f,
+     1.0f, 1.0f,-1.0f,
+
+     1.0f, 1.0f,-1.0f,  // +X side
+     1.0f, 1.0f, 1.0f,
+     1.0f,-1.0f, 1.0f,
+     1.0f,-1.0f, 1.0f,
+     1.0f,-1.0f,-1.0f,
+     1.0f, 1.0f,-1.0f,
+
+    -1.0f, 1.0f, 1.0f,  // +Z side
+    -1.0f,-1.0f, 1.0f,
+     1.0f, 1.0f, 1.0f,
+    -1.0f,-1.0f, 1.0f,
+     1.0f,-1.0f, 1.0f,
+     1.0f, 1.0f, 1.0f,
+};
+
+static const float g_uv_buffer_data [] = {
+    0.0f, 1.0f,  // -X side
+    1.0f, 1.0f,
+    1.0f, 0.0f,
+    1.0f, 0.0f,
+    0.0f, 0.0f,
+    0.0f, 1.0f,
+
+    1.0f, 1.0f,  // -Z side
+    0.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f,
+    1.0f, 0.0f,
+    0.0f, 0.0f,
+
+    1.0f, 0.0f,  // -Y side
+    1.0f, 1.0f,
+    0.0f, 1.0f,
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    0.0f, 0.0f,
+
+    1.0f, 0.0f,  // +Y side
+    0.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f,
+
+    1.0f, 0.0f,  // +X side
+    0.0f, 0.0f,
+    0.0f, 1.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f,
+    1.0f, 0.0f,
+
+    0.0f, 0.0f,  // +Z side
+    0.0f, 1.0f,
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    1.0f, 1.0f,
+    1.0f, 0.0f,
+};
+
+static char *tex_files [] = {"lunarg.ppm"};
+
+#pragma endregion
+
 typedef struct {
     VkImage image;
     VkCommandBuffer cmd;
@@ -84,6 +185,28 @@ typedef struct {
     VkFramebuffer framebuffer;
     VkDescriptorSet descriptor_set;
 } SwapchainImageResources;
+
+// NOTE(omid): structure to track all objects related to a texture.
+typedef struct {
+    VkSampler sampler;
+
+    VkImage image;
+    VkBuffer buffer;
+    VkImageLayout image_layout;
+
+    VkMemoryAllocateInfo mem_alloc;
+    VkDeviceMemory mem;
+    VkImageView view;
+    int32_t tex_width, tex_height;
+} TextureObject;
+
+typedef struct {
+    // Must start with MVP
+    float mvp[4][4];
+    float position[12 * 3][4];
+    float attr[12 * 3][4];
+} VkCubeTexVSUniform;
+
 typedef struct {
     VkInstance                  inst;
     VkDevice                    device;     // logical device
@@ -134,6 +257,15 @@ typedef struct {
         VkDeviceMemory          mem;
         VkImageView view;
     } depth;
+
+    bool use_staging_buffer;
+    TextureObject textures[_TEXTURE_COUNT];
+    TextureObject staging_texture;
+
+    mat4x4 projection_matrix;
+    mat4x4 view_matrix;
+    mat4x4 model_matrix;
+
 
     VkSemaphore                 image_acquired_semaphores[FRAME_LAG];
     VkSemaphore                 draw_complete_semaphores[FRAME_LAG];
@@ -596,6 +728,409 @@ build_depthbuffer (Demo * demo) {
     view_ci.image = demo->depth.image;
     err = vkCreateImageView(demo->device, &view_ci, NULL, &demo->depth.view);
     _ASSERT_EXPR(0 == err, "vkCreateImageView failed");
+}
+/* Convert ppm image data from header file into RGBA texture image */
+#include "lunarg.ppm.h"
+bool load_texture(
+    char const * filename,
+    uint8_t * rgba_data,
+    VkSubresourceLayout * layout,
+    int32_t * width, int32_t * height
+) {
+    (void)filename;
+    char *cPtr;
+    cPtr = (char *)lunarg_ppm;
+    if ((unsigned char *)cPtr >= (lunarg_ppm + lunarg_ppm_len) || strncmp(cPtr, "P6\n", 3)) {
+        return false;
+    }
+    while (strncmp(cPtr++, "\n", 1))
+        ;
+    sscanf(cPtr, "%u %u", width, height);
+    if (rgba_data == NULL) {
+        return true;
+    }
+    while (strncmp(cPtr++, "\n", 1))
+        ;
+    if ((unsigned char *)cPtr >= (lunarg_ppm + lunarg_ppm_len) || strncmp(cPtr, "255\n", 4)) {
+        return false;
+    }
+    while (strncmp(cPtr++, "\n", 1))
+        ;
+    for (int y = 0; y < *height; y++) {
+        uint8_t *rowPtr = rgba_data;
+        for (int x = 0; x < *width; x++) {
+            memcpy(rowPtr, cPtr, 3);
+            rowPtr[3] = 255; /* Alpha of 1 */
+            rowPtr += 4;
+            cPtr += 3;
+        }
+        rgba_data += layout->rowPitch;
+    }
+    return true;
+}
+static void
+build_texture_buffer (Demo * demo, char const * filename, TextureObject * tex_obj) {
+    int32_t tex_width = 0;
+    int32_t tex_height = 0;
+    VkResult err;
+    bool pass;
+
+    if (load_texture(filename, NULL, NULL, &tex_width, &tex_height)) {
+        ERREXIT("Failed to load textures", "Load Texture Failure");
+    }
+
+    tex_obj->tex_width = tex_width;
+    tex_obj->tex_height = tex_height;
+
+    VkBufferCreateInfo buffer_create_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .size = tex_width * tex_height * 4,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = NULL
+    };
+
+    err = vkCreateBuffer(demo->device, &buffer_create_info, NULL, &tex_obj->buffer);
+    _ASSERT_EXPR(0 == err, "vkCreateBuffer failed");
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(demo->device, tex_obj->buffer, &mem_reqs);
+
+    tex_obj->mem_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    tex_obj->mem_alloc.pNext = NULL;
+    tex_obj->mem_alloc.allocationSize = mem_reqs.size;
+    tex_obj->mem_alloc.memoryTypeIndex = 0;
+
+    VkFlags requirements = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    pass = memory_type_from_properties(demo, mem_reqs.memoryTypeBits, requirements, &tex_obj->mem_alloc.memoryTypeIndex);
+    _ASSERT_EXPR(0 == err, "memory_type_from_properties failed");
+
+    err = vkAllocateMemory(demo->device, &tex_obj->mem_alloc, NULL, &(tex_obj->mem));
+    _ASSERT_EXPR(0 == err, "vkAllocateMemory failed");
+
+    /* bind memory */
+    err = vkBindBufferMemory(demo->device, tex_obj->buffer, tex_obj->mem, 0);
+    _ASSERT_EXPR(0 == err, "vkBindBufferMemory failed");
+
+    VkSubresourceLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.rowPitch = tex_width * 4;
+
+    void *data;
+    err = vkMapMemory(demo->device, tex_obj->mem, 0, tex_obj->mem_alloc.allocationSize, 0, &data);
+    _ASSERT_EXPR(0 == err, "vkMapMemory failed");
+
+    if (!load_texture(filename, data, &layout, &tex_width, &tex_height)) {
+        ERREXIT("Error loading texture", "Check file name");
+    }
+
+    vkUnmapMemory(demo->device, tex_obj->mem);
+}
+static void
+build_texture_image (
+    Demo * demo, char const * filename, TextureObject * tex_obj,
+    VkImageTiling tiling, VkImageUsageFlags usage, VkFlags required_props
+) {
+    VkFormat tex_format = VK_FORMAT_R8G8B8A8_UNORM;
+    int32_t tex_width = 0;
+    int32_t tex_height = 0;
+    VkResult err;
+    bool pass;
+
+    if (!load_texture(filename, NULL, NULL, &tex_width, &tex_height)) {
+        ERREXIT("Failed to load textures", "Load Texture Failure");
+    }
+
+    tex_obj->tex_width = tex_width;
+    tex_obj->tex_height = tex_height;
+
+    const VkImageCreateInfo image_create_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = NULL,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = tex_format,
+        .extent = {tex_width, tex_height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = tiling,
+        .usage = usage,
+        .flags = 0,
+        .initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
+    };
+
+    VkMemoryRequirements mem_reqs;
+
+    err = vkCreateImage(demo->device, &image_create_info, NULL, &tex_obj->image);
+    _ASSERT_EXPR(0 == err, "vkCreateImage failed");
+
+    vkGetImageMemoryRequirements(demo->device, tex_obj->image, &mem_reqs);
+
+    tex_obj->mem_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    tex_obj->mem_alloc.pNext = NULL;
+    tex_obj->mem_alloc.allocationSize = mem_reqs.size;
+    tex_obj->mem_alloc.memoryTypeIndex = 0;
+
+    pass = memory_type_from_properties(demo, mem_reqs.memoryTypeBits, required_props, &tex_obj->mem_alloc.memoryTypeIndex);
+    _ASSERT_EXPR(pass, "could not get memory type from properties");
+
+    /* allocate memory */
+    err = vkAllocateMemory(demo->device, &tex_obj->mem_alloc, NULL, &(tex_obj->mem));
+    _ASSERT_EXPR(0 == err, "vkAllocateMemory failed");
+
+    /* bind memory */
+    err = vkBindImageMemory(demo->device, tex_obj->image, tex_obj->mem, 0);
+    _ASSERT_EXPR(0 == err, "vkBindImageMemory failed");
+
+    if (required_props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        VkImageSubresource subres = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .arrayLayer = 0,
+        };
+        VkSubresourceLayout layout;
+        void *data;
+
+        vkGetImageSubresourceLayout(demo->device, tex_obj->image, &subres, &layout);
+
+        err = vkMapMemory(demo->device, tex_obj->mem, 0, tex_obj->mem_alloc.allocationSize, 0, &data);
+        _ASSERT_EXPR(0 == err, "vkMapMemory Failed");
+
+        if (!load_texture(filename, data, &layout, &tex_width, &tex_height)) {
+            ERREXIT("Error loading texture", "check filename");
+        }
+
+        vkUnmapMemory(demo->device, tex_obj->mem);
+    }
+
+    tex_obj->image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+static void
+set_image_layout (
+    Demo * demo, VkImage image,
+    VkImageAspectFlags aspect_mask,
+    VkImageLayout old_image_layout,
+    VkImageLayout new_image_layout,
+    VkAccessFlagBits src_access_mask,
+    VkPipelineStageFlags src_stages,
+    VkPipelineStageFlags dest_stages
+) {
+    _ASSERT_EXPR(demo->cmd_buf, "invalid cmd buffer");
+
+    VkImageMemoryBarrier image_memory_barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = NULL,
+        .srcAccessMask = src_access_mask,
+        .dstAccessMask = 0,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .oldLayout = old_image_layout,
+        .newLayout = new_image_layout,
+        .image = image,
+        .subresourceRange = {aspect_mask, 0, 1, 0, 1}};
+
+    switch (new_image_layout) {
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        /* Make sure anything that was copying from this image has completed */
+        image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        break;
+
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        break;
+
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        image_memory_barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        image_memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+        break;
+
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        break;
+
+    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+        image_memory_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        break;
+
+    default:
+        image_memory_barrier.dstAccessMask = 0;
+        break;
+    }
+
+    VkImageMemoryBarrier * pmemory_barrier = &image_memory_barrier;
+
+    vkCmdPipelineBarrier(demo->cmd_buf, src_stages, dest_stages, 0, 0, NULL, 0, NULL, 1, pmemory_barrier);
+}
+static void
+build_textures (Demo * demo) {
+    const VkFormat tex_format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormatProperties props;
+
+    vkGetPhysicalDeviceFormatProperties(demo->gpu, tex_format, &props);
+
+    for (unsigned i = 0; i < _TEXTURE_COUNT; i++) {
+        VkResult err;
+
+        if ((props.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) && !demo->use_staging_buffer) {
+            /* Device can texture using linear textures */
+            build_texture_image(demo, tex_files[i], &demo->textures[i], VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+     // Nothing in the pipeline needs to be complete to start, and don't allow fragment
+     // shader to run until layout transition completes
+            set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PREINITIALIZED,
+                                  demo->textures[i].image_layout, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            demo->staging_texture.image = 0;
+        } else if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
+            /* Must use staging buffer to copy linear texture to optimized */
+
+            memset(&demo->staging_texture, 0, sizeof(demo->staging_texture));
+            build_texture_buffer(demo, tex_files[i], &demo->staging_texture);
+
+            build_texture_image(demo, tex_files[i], &demo->textures[i], VK_IMAGE_TILING_OPTIMAL,
+                                (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+            set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PREINITIALIZED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+            VkBufferImageCopy copy_region = {
+                .bufferOffset = 0,
+                .bufferRowLength = demo->staging_texture.tex_width,
+                .bufferImageHeight = demo->staging_texture.tex_height,
+                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {demo->staging_texture.tex_width, demo->staging_texture.tex_height, 1},
+            };
+
+            vkCmdCopyBufferToImage(demo->cmd_buf, demo->staging_texture.buffer, demo->textures[i].image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+
+            set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  demo->textures[i].image_layout, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        } else {
+            ERREXIT("No support for R8G8B8A8_UNORM as texture image format", "Can't support VK_FORMAT_R8G8B8A8_UNORM !?");
+        }
+
+        VkSamplerCreateInfo sampler = {
+            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext = NULL,
+            .magFilter = VK_FILTER_NEAREST,
+            .minFilter = VK_FILTER_NEAREST,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .mipLodBias = 0.0f,
+            .anisotropyEnable = VK_FALSE,
+            .maxAnisotropy = 1,
+            .compareOp = VK_COMPARE_OP_NEVER,
+            .minLod = 0.0f,
+            .maxLod = 0.0f,
+            .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VkImageViewCreateInfo view = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = NULL,
+            .image = VK_NULL_HANDLE,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = tex_format,
+            .components =
+                {
+                    VK_COMPONENT_SWIZZLE_IDENTITY,
+                    VK_COMPONENT_SWIZZLE_IDENTITY,
+                    VK_COMPONENT_SWIZZLE_IDENTITY,
+                    VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            .flags = 0,
+        };
+
+        /* create sampler */
+        err = vkCreateSampler(demo->device, &sampler, NULL, &demo->textures[i].sampler);
+        _ASSERT_EXPR(0 == err, "vkCreateSampler failed");
+
+        /* create image view */
+        view.image = demo->textures[i].image;
+        err = vkCreateImageView(demo->device, &view, NULL, &demo->textures[i].view);
+        _ASSERT_EXPR(0 == err, "vkCreateImageView");
+    }
+}
+static void
+build_cube (Demo * demo) {
+    VkBufferCreateInfo buf_info;
+    VkMemoryRequirements mem_reqs;
+    VkMemoryAllocateInfo mem_alloc;
+    mat4x4 MVP, VP;
+    VkResult err;
+    bool pass;
+    VkCubeTexVSUniform data;
+
+    mat4x4_mul(VP, demo->projection_matrix, demo->view_matrix);
+    mat4x4_mul(MVP, VP, demo->model_matrix);
+    memcpy(data.mvp, MVP, sizeof(MVP));
+    //    dumpMatrix("MVP", MVP);
+
+    for (unsigned int i = 0; i < 12 * 3; i++) {
+        data.position[i][0] = g_vertex_buffer_data[i * 3];
+        data.position[i][1] = g_vertex_buffer_data[i * 3 + 1];
+        data.position[i][2] = g_vertex_buffer_data[i * 3 + 2];
+        data.position[i][3] = 1.0f;
+        data.attr[i][0] = g_uv_buffer_data[2 * i];
+        data.attr[i][1] = g_uv_buffer_data[2 * i + 1];
+        data.attr[i][2] = 0;
+        data.attr[i][3] = 0;
+    }
+
+    memset(&buf_info, 0, sizeof(buf_info));
+    buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buf_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    buf_info.size = sizeof(data);
+
+    for (unsigned int i = 0; i < demo->swapchain_image_count; i++) {
+        err = vkCreateBuffer(demo->device, &buf_info, NULL, &demo->swapchain_image_resources[i].uniform_buffer);
+        _ASSERT_EXPR(0 == err, "vkCreateBuffer failed");
+
+        vkGetBufferMemoryRequirements(demo->device, demo->swapchain_image_resources[i].uniform_buffer, &mem_reqs);
+
+        mem_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mem_alloc.pNext = NULL;
+        mem_alloc.allocationSize = mem_reqs.size;
+        mem_alloc.memoryTypeIndex = 0;
+
+        pass = memory_type_from_properties(
+            demo, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            &mem_alloc.memoryTypeIndex
+        );
+        _ASSERT_EXPR(pass, "could not get memory type from properties");
+
+        err = vkAllocateMemory(demo->device, &mem_alloc, NULL, &demo->swapchain_image_resources[i].uniform_memory);
+        _ASSERT_EXPR(0 == err, "vkAllocateMemory failed");
+
+        err = vkMapMemory(demo->device, demo->swapchain_image_resources[i].uniform_memory, 0, VK_WHOLE_SIZE, 0,
+                          &demo->swapchain_image_resources[i].uniform_memory_ptr);
+        _ASSERT_EXPR(0 == err, "vkMapMemory failed");
+
+        memcpy(demo->swapchain_image_resources[i].uniform_memory_ptr, &data, sizeof data);
+
+        err = vkBindBufferMemory(
+            demo->device, demo->swapchain_image_resources[i].uniform_buffer,
+            demo->swapchain_image_resources[i].uniform_memory, 0
+        );
+        _ASSERT_EXPR(0 == err, "vkBindBufferMemory failed");
+    }
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -1114,6 +1649,10 @@ WinMain (
     build_backbuffers(&demo);
 
     build_depthbuffer(&demo);
+
+    build_textures(&demo);
+
+    build_cube(&demo);
 
 #pragma region Main Loop
     // Run the message loop.
