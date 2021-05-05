@@ -222,6 +222,11 @@ typedef struct {
 
     VkCommandPool               cmd_pool;
     VkCommandBuffer             cmd_buf;
+    VkPipelineLayout            pipeline_layout;
+    VkDescriptorSetLayout       descriptor_layout;
+    VkPipelineCache             pipeline_cache;
+    VkRenderPass                render_pass;
+    VkPipeline                  pipeline;
 
     int                         width;
     int                         height;
@@ -984,8 +989,8 @@ build_textures (Demo * demo) {
      // Nothing in the pipeline needs to be complete to start, and don't allow fragment
      // shader to run until layout transition completes
             set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PREINITIALIZED,
-                                  demo->textures[i].image_layout, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                             demo->textures[i].image_layout, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
             demo->staging_texture.image = 0;
         } else if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
             /* Must use staging buffer to copy linear texture to optimized */
@@ -998,8 +1003,8 @@ build_textures (Demo * demo) {
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
             set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PREINITIALIZED,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT);
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT);
 
             VkBufferImageCopy copy_region = {
                 .bufferOffset = 0,
@@ -1014,8 +1019,8 @@ build_textures (Demo * demo) {
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
 
             set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  demo->textures[i].image_layout, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                             demo->textures[i].image_layout, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
         } else {
             ERREXIT("No support for R8G8B8A8_UNORM as texture image format", "Can't support VK_FORMAT_R8G8B8A8_UNORM !?");
@@ -1131,6 +1136,47 @@ build_cube (Demo * demo) {
         );
         _ASSERT_EXPR(0 == err, "vkBindBufferMemory failed");
     }
+}
+static void
+build_descriptor_layout(Demo * demo) {
+    VkDescriptorSetLayoutBinding layout_bindings[2] = {
+        [0] =
+            {
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+                .pImmutableSamplers = NULL,
+            },
+        [1] =
+            {
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = _TEXTURE_COUNT,
+                .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .pImmutableSamplers = NULL,
+            },
+    };
+    VkDescriptorSetLayoutCreateInfo descriptor_layout_ci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .bindingCount = 2,
+        .pBindings = layout_bindings,
+    };
+    VkResult err;
+
+    err = vkCreateDescriptorSetLayout(demo->device, &descriptor_layout_ci, NULL, &demo->descriptor_layout);
+    _ASSERT_EXPR(0 == err, "vkCreateDescriptorSetLayout failed");
+
+    VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .setLayoutCount = 1,
+        .pSetLayouts = &demo->descriptor_layout,
+    };
+
+    err = vkCreatePipelineLayout(demo->device, &pPipelineLayoutCreateInfo, NULL, &demo->pipeline_layout);
+    _ASSERT_EXPR(0 == err, "vkCreatePipelineLayout failed");
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -1653,6 +1699,56 @@ WinMain (
     build_textures(&demo);
 
     build_cube(&demo);
+
+    build_descriptor_layout(&demo);
+
+    // build_render_pass
+
+
+    // build_pipeline;
+
+
+    // allocate cmd buffers and handle separate present queue case
+
+
+    /*
+        for (uint32_t i = 0; i < demo->swapchainImageCount; i++) {
+        err = vkAllocateCommandBuffers(demo->device, &cmd, &demo->swapchain_image_resources[i].cmd);
+        assert(!err);
+    }
+
+    if (demo->separate_present_queue) {
+        const VkCommandPoolCreateInfo present_cmd_pool_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .pNext = NULL,
+            .queueFamilyIndex = demo->present_queue_family_index,
+            .flags = 0,
+        };
+        err = vkCreateCommandPool(demo->device, &present_cmd_pool_info, NULL, &demo->present_cmd_pool);
+        assert(!err);
+        const VkCommandBufferAllocateInfo present_cmd_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = NULL,
+            .commandPool = demo->present_cmd_pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        for (uint32_t i = 0; i < demo->swapchainImageCount; i++) {
+            err = vkAllocateCommandBuffers(demo->device, &present_cmd_info,
+                                           &demo->swapchain_image_resources[i].graphics_to_present_cmd);
+            assert(!err);
+            demo_build_image_ownership_cmd(demo, i);
+        }
+    }
+    */
+
+
+    // build_descriptor_pool
+    // build_descriptor_set
+
+
+    // build_framebuffers
+
 
 #pragma region Main Loop
     // Run the message loop.
