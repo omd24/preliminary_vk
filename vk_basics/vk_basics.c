@@ -225,7 +225,7 @@ typedef struct {
     VkPipelineLayout            pipeline_layout;
     VkDescriptorSetLayout       descriptor_layout;
     VkPipelineCache             pipeline_cache;
-    VkRenderPass                render_pass;
+    VkRenderPass                renderpass;
     VkPipeline                  pipeline;
 
     int                         width;
@@ -1178,6 +1178,106 @@ build_descriptor_layout(Demo * demo) {
     err = vkCreatePipelineLayout(demo->device, &pPipelineLayoutCreateInfo, NULL, &demo->pipeline_layout);
     _ASSERT_EXPR(0 == err, "vkCreatePipelineLayout failed");
 }
+static void
+build_renderpass (Demo * demo) {
+        // The initial layout for the color and depth attachments will be LAYOUT_UNDEFINED
+        // because at the start of the renderpass, we don't care about their contents.
+        // At the start of the subpass, the color attachment's layout will be transitioned
+        // to LAYOUT_COLOR_ATTACHMENT_OPTIMAL and the depth stencil attachment's layout
+        // will be transitioned to LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL.  At the end of
+        // the renderpass, the color attachment's layout will be transitioned to
+        // LAYOUT_PRESENT_SRC_KHR to be ready to present.  This is all done as part of
+        // the renderpass, no barriers are necessary.
+    VkAttachmentDescription attachments[2] = {
+        [0] =
+            {
+                .format = demo->format,
+                .flags = 0,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            },
+        [1] =
+            {
+                .format = demo->depth.format,
+                .flags = 0,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            },
+    };
+    VkAttachmentReference color_reference = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    VkAttachmentReference depth_reference = {
+        .attachment = 1,
+        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+    VkSubpassDescription subpass = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .flags = 0,
+        .inputAttachmentCount = 0,
+        .pInputAttachments = NULL,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_reference,
+        .pResolveAttachments = NULL,
+        .pDepthStencilAttachment = &depth_reference,
+        .preserveAttachmentCount = 0,
+        .pPreserveAttachments = NULL,
+    };
+
+    VkSubpassDependency attachment_deps[2] = {
+        [0] =
+            {
+                // Depth buffer is shared between swapchain images
+                .srcSubpass = VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .dependencyFlags = 0,
+            },
+        [1] =
+            {
+                // Image Layout Transition
+                .srcSubpass = VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+                .dependencyFlags = 0,
+            },
+    };
+
+    VkRenderPassCreateInfo renderpass_ci = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .attachmentCount = 2,
+        .pAttachments = attachments,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 2,
+        .pDependencies = attachment_deps,
+    };
+    VkResult err = vkCreateRenderPass(demo->device, &renderpass_ci, NULL, &demo->renderpass);
+    _ASSERT_EXPR(0 == err, "vkCreateRenderPass failed");
+}
+static void
+build_pipeline (Demo * demo) {
+    ...
+}
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -1702,10 +1802,9 @@ WinMain (
 
     build_descriptor_layout(&demo);
 
-    // build_render_pass
+    build_renderpass(&demo);
 
-
-    // build_pipeline;
+    build_pipeline(&demo);
 
 
     // allocate cmd buffers and handle separate present queue case
