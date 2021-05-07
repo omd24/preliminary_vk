@@ -271,6 +271,8 @@ typedef struct {
     mat4x4 view_matrix;
     mat4x4 model_matrix;
 
+    VkShaderModule vertex_shader_module;
+    VkShaderModule pixel_shader_module;
 
     VkSemaphore                 image_acquired_semaphores[FRAME_LAG];
     VkSemaphore                 draw_complete_semaphores[FRAME_LAG];
@@ -986,7 +988,7 @@ build_textures (Demo * demo) {
             /* Device can texture using linear textures */
             build_texture_image(demo, tex_files[i], &demo->textures[i], VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-     // Nothing in the pipeline needs to be complete to start, and don't allow fragment
+     // Nothing in the pipeline_ci needs to be complete to start, and don't allow fragment
      // shader to run until layout transition completes
             set_image_layout(demo, demo->textures[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_PREINITIALIZED,
                              demo->textures[i].image_layout, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -1274,9 +1276,157 @@ build_renderpass (Demo * demo) {
     VkResult err = vkCreateRenderPass(demo->device, &renderpass_ci, NULL, &demo->renderpass);
     _ASSERT_EXPR(0 == err, "vkCreateRenderPass failed");
 }
+static VkShaderModule
+build_shader_module (Demo * demo, const uint32_t * code, size_t size) {
+    VkShaderModule module;
+    VkShaderModuleCreateInfo moduleCreateInfo;
+    VkResult err;
+
+    moduleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    moduleCreateInfo.pNext = NULL;
+    moduleCreateInfo.flags = 0;
+    moduleCreateInfo.codeSize = size;
+    moduleCreateInfo.pCode = code;
+
+    err = vkCreateShaderModule(demo->device, &moduleCreateInfo, NULL, &module);
+    _ASSERT_EXPR(0 == err, "vkCreateShaderModule failed");
+
+    return module;
+}
+
+static void
+build_vs_module (Demo * demo) {
+    const uint32_t vs_code[] = {
+#include "cube.vert.inc"
+    };
+    demo->vertex_shader_module = build_shader_module(demo, vs_code, sizeof(vs_code));
+}
+
+static void
+build_ps_module (Demo * demo) {
+    const uint32_t fs_code[] = {
+#include "cube.frag.inc"
+    };
+    demo->pixel_shader_module = build_shader_module(demo, fs_code, sizeof(fs_code));
+}
 static void
 build_pipeline (Demo * demo) {
-    ...
+#define NUM_DYNAMIC_STATES 2 /*Viewport + Scissor*/
+
+    VkGraphicsPipelineCreateInfo pipeline_ci;
+    VkPipelineCacheCreateInfo pipeline_cache_ci;
+    VkPipelineVertexInputStateCreateInfo vertex_input_ci;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly_ci;
+    VkPipelineRasterizationStateCreateInfo rasterizer_ci;
+    VkPipelineColorBlendStateCreateInfo blend_state_ci;
+    VkPipelineDepthStencilStateCreateInfo depth_stencil_ci;
+    VkPipelineViewportStateCreateInfo viewport_ci;
+    VkPipelineMultisampleStateCreateInfo mulitsample_state_ci;
+    VkDynamicState dynamic_states_enables[NUM_DYNAMIC_STATES];
+    VkPipelineDynamicStateCreateInfo dynamic_state_ci;
+    VkResult err;
+
+    memset(dynamic_states_enables, 0, sizeof(dynamic_states_enables));
+    memset(&dynamic_state_ci, 0, sizeof(dynamic_state_ci));
+    dynamic_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic_state_ci.pDynamicStates = dynamic_states_enables;
+
+    memset(&pipeline_ci, 0, sizeof(pipeline_ci));
+    pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_ci.layout = demo->pipeline_layout;
+
+    memset(&vertex_input_ci, 0, sizeof(vertex_input_ci));
+    vertex_input_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    memset(&input_assembly_ci, 0, sizeof(input_assembly_ci));
+    input_assembly_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly_ci.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    memset(&rasterizer_ci, 0, sizeof(rasterizer_ci));
+    rasterizer_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer_ci.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer_ci.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer_ci.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer_ci.depthClampEnable = VK_FALSE;
+    rasterizer_ci.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer_ci.depthBiasEnable = VK_FALSE;
+    rasterizer_ci.lineWidth = 1.0f;
+
+    memset(&blend_state_ci, 0, sizeof(blend_state_ci));
+    blend_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    VkPipelineColorBlendAttachmentState att_state[1];
+    memset(att_state, 0, sizeof(att_state));
+    att_state[0].colorWriteMask = 0xf;
+    att_state[0].blendEnable = VK_FALSE;
+    blend_state_ci.attachmentCount = 1;
+    blend_state_ci.pAttachments = att_state;
+
+    memset(&viewport_ci, 0, sizeof(viewport_ci));
+    viewport_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_ci.viewportCount = 1;
+    dynamic_states_enables[dynamic_state_ci.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
+    viewport_ci.scissorCount = 1;
+    dynamic_states_enables[dynamic_state_ci.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
+
+    memset(&depth_stencil_ci, 0, sizeof(depth_stencil_ci));
+    depth_stencil_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil_ci.depthTestEnable = VK_TRUE;
+    depth_stencil_ci.depthWriteEnable = VK_TRUE;
+    depth_stencil_ci.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    depth_stencil_ci.depthBoundsTestEnable = VK_FALSE;
+    depth_stencil_ci.back.failOp = VK_STENCIL_OP_KEEP;
+    depth_stencil_ci.back.passOp = VK_STENCIL_OP_KEEP;
+    depth_stencil_ci.back.compareOp = VK_COMPARE_OP_ALWAYS;
+    depth_stencil_ci.stencilTestEnable = VK_FALSE;
+    depth_stencil_ci.front = depth_stencil_ci.back;
+
+    memset(&mulitsample_state_ci, 0, sizeof(mulitsample_state_ci));
+    mulitsample_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    mulitsample_state_ci.pSampleMask = NULL;
+    mulitsample_state_ci.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    build_vs_module(demo);
+    build_ps_module(demo);
+
+    // Two stages: vertex shader and pixel shader
+    VkPipelineShaderStageCreateInfo shader_stages[2];
+    memset(&shader_stages, 0, 2 * sizeof(VkPipelineShaderStageCreateInfo));
+
+    shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stages[0].module = demo->vertex_shader_module;
+    shader_stages[0].pName = "main";
+
+    shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shader_stages[1].module = demo->pixel_shader_module;
+    shader_stages[1].pName = "main";
+
+    memset(&pipeline_cache_ci, 0, sizeof(pipeline_cache_ci));
+    pipeline_cache_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+
+    err = vkCreatePipelineCache(demo->device, &pipeline_cache_ci, NULL, &demo->pipeline_cache);
+    _ASSERT_EXPR(0 == err, "vkCreatePipelineCache failed");
+
+    pipeline_ci.pVertexInputState = &vertex_input_ci;
+    pipeline_ci.pInputAssemblyState = &input_assembly_ci;
+    pipeline_ci.pRasterizationState = &rasterizer_ci;
+    pipeline_ci.pColorBlendState = &blend_state_ci;
+    pipeline_ci.pMultisampleState = &mulitsample_state_ci;
+    pipeline_ci.pViewportState = &viewport_ci;
+    pipeline_ci.pDepthStencilState = &depth_stencil_ci;
+    pipeline_ci.stageCount = _countof(shader_stages);
+    pipeline_ci.pStages = shader_stages;
+    pipeline_ci.renderPass = demo->renderpass;
+    pipeline_ci.pDynamicState = &dynamic_state_ci;
+
+    pipeline_ci.renderPass = demo->renderpass;
+
+    err = vkCreateGraphicsPipelines(demo->device, demo->pipeline_cache, 1, &pipeline_ci, NULL, &demo->pipeline);
+    _ASSERT_EXPR(0 == err, "vkCreateGraphicsPipelines failed");
+
+    vkDestroyShaderModule(demo->device, demo->pixel_shader_module, NULL);
+    vkDestroyShaderModule(demo->device, demo->vertex_shader_module, NULL);
 }
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {

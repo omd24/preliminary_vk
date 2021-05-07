@@ -30,4 +30,12 @@
       <Filter>Resource Files</Filter>
     </ClInclude>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="cube.frag.inc">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="cube.vert.inc">
+      <Filter>Resource Files</Filter>
+    </None>
+  </ItemGroup>
 </Project>
