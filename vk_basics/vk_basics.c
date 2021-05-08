@@ -221,12 +221,14 @@ typedef struct {
     char *                      enabled_layers[64];
 
     VkCommandPool               cmd_pool;
+    VkCommandPool               cmd_pool_present;
     VkCommandBuffer             cmd_buf;
     VkPipelineLayout            pipeline_layout;
     VkDescriptorSetLayout       descriptor_layout;
     VkPipelineCache             pipeline_cache;
     VkRenderPass                renderpass;
     VkPipeline                  pipeline;
+    VkDescriptorPool            descriptor_pool;
 
     int                         width;
     int                         height;
@@ -1296,7 +1298,7 @@ build_shader_module (Demo * demo, const uint32_t * code, size_t size) {
 
 static void
 build_vs_module (Demo * demo) {
-    const uint32_t vs_code[] = {
+    const uint32_t vs_code [] = {
 #include "cube.vert.inc"
     };
     demo->vertex_shader_module = build_shader_module(demo, vs_code, sizeof(vs_code));
@@ -1304,7 +1306,7 @@ build_vs_module (Demo * demo) {
 
 static void
 build_ps_module (Demo * demo) {
-    const uint32_t fs_code[] = {
+    const uint32_t fs_code [] = {
 #include "cube.frag.inc"
     };
     demo->pixel_shader_module = build_shader_module(demo, fs_code, sizeof(fs_code));
@@ -1428,6 +1430,115 @@ build_pipeline (Demo * demo) {
     vkDestroyShaderModule(demo->device, demo->pixel_shader_module, NULL);
     vkDestroyShaderModule(demo->device, demo->vertex_shader_module, NULL);
 }
+static void
+build_image_ownership_cmd(Demo * demo, int i) {
+    VkResult err;
+
+    VkCommandBufferBeginInfo cmd_buf_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+        .pInheritanceInfo = NULL,
+    };
+    err = vkBeginCommandBuffer(demo->swapchain_image_resources[i].graphics_to_present_cmd, &cmd_buf_info);
+    _ASSERT_EXPR(0 == err, "vkBeginCommandBUffer failed");
+
+    VkImageMemoryBarrier image_ownership_barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = NULL,
+        .srcAccessMask = 0,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .srcQueueFamilyIndex = demo->graphics_queue_family_index,
+        .dstQueueFamilyIndex = demo->present_queue_family_index,
+        .image = demo->swapchain_image_resources[i].image,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
+    };
+
+    vkCmdPipelineBarrier(
+        demo->swapchain_image_resources[i].graphics_to_present_cmd,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, NULL, 0, NULL, 1, &image_ownership_barrier
+    );
+    err = vkEndCommandBuffer(demo->swapchain_image_resources[i].graphics_to_present_cmd);
+    _ASSERT_EXPR(0 == err, "vkEndCommandBuffer failed");
+}
+static void
+build_descriptor_pool (Demo * demo) {
+    VkDescriptorPoolSize type_counts[2] = {
+        [0] =
+            {
+                .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = demo->swapchain_image_count,
+            },
+        [1] =
+            {
+                .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = demo->swapchain_image_count * _TEXTURE_COUNT,
+            },
+    };
+    VkDescriptorPoolCreateInfo descriptor_pool_ci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .maxSets = demo->swapchain_image_count,
+        .poolSizeCount = 2,
+        .pPoolSizes = type_counts,
+    };
+    VkResult err;
+
+    err = vkCreateDescriptorPool(demo->device, &descriptor_pool_ci, NULL, &demo->descriptor_pool);
+    _ASSERT_EXPR(0 == err, "failed to create descriptor pool");
+}
+static void
+build_descriptor_set (Demo * demo) {
+    VkDescriptorImageInfo tex_descs[_TEXTURE_COUNT];
+    VkWriteDescriptorSet writes[2];
+    VkResult err;
+
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = NULL,
+        .descriptorPool = demo->descriptor_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &demo->descriptor_layout};
+
+    VkDescriptorBufferInfo buffer_info;
+    buffer_info.offset = 0;
+    buffer_info.range = sizeof(VkCubeTexVSUniform);
+
+    memset(&tex_descs, 0, sizeof(tex_descs));
+    for (unsigned int i = 0; i < _TEXTURE_COUNT; i++) {
+        tex_descs[i].sampler = demo->textures[i].sampler;
+        tex_descs[i].imageView = demo->textures[i].view;
+        tex_descs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    memset(&writes, 0, sizeof(writes));
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].pBufferInfo = &buffer_info;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = _TEXTURE_COUNT;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = tex_descs;
+
+    for (unsigned int i = 0; i < demo->swapchain_image_count; i++) {
+        err = vkAllocateDescriptorSets(demo->device, &alloc_info, &demo->swapchain_image_resources[i].descriptor_set);
+        _ASSERT_EXPR(0 == err, "vkAllocateDescriptorsets failed");
+        buffer_info.buffer = demo->swapchain_image_resources[i].uniform_buffer;
+        writes[0].dstSet = demo->swapchain_image_resources[i].descriptor_set;
+        writes[1].dstSet = demo->swapchain_image_resources[i].descriptor_set;
+        vkUpdateDescriptorSets(demo->device, 2, writes, 0, NULL);
+    }
+}
+
+
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -1956,48 +2067,45 @@ WinMain (
 
     build_pipeline(&demo);
 
-
-    // allocate cmd buffers and handle separate present queue case
-
-
-    /*
-        for (uint32_t i = 0; i < demo->swapchainImageCount; i++) {
-        err = vkAllocateCommandBuffers(demo->device, &cmd, &demo->swapchain_image_resources[i].cmd);
-        assert(!err);
+    for (uint32_t i = 0; i < demo.swapchain_image_count; i++) {
+        err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_ci, &demo.swapchain_image_resources[i].cmd);
+        _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
     }
 
-    if (demo->separate_present_queue) {
+    if (demo.separate_present_queue) {
         const VkCommandPoolCreateInfo present_cmd_pool_info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .pNext = NULL,
-            .queueFamilyIndex = demo->present_queue_family_index,
+            .queueFamilyIndex = demo.present_queue_family_index,
             .flags = 0,
         };
-        err = vkCreateCommandPool(demo->device, &present_cmd_pool_info, NULL, &demo->present_cmd_pool);
-        assert(!err);
+        err = vkCreateCommandPool(demo.device, &present_cmd_pool_info, NULL, &demo.cmd_pool_present);
+        _ASSERT_EXPR(0 == err, "vkCreateCommandPool failed");
         const VkCommandBufferAllocateInfo present_cmd_info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = NULL,
-            .commandPool = demo->present_cmd_pool,
+            .commandPool = demo.cmd_pool_present,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1,
         };
-        for (uint32_t i = 0; i < demo->swapchainImageCount; i++) {
-            err = vkAllocateCommandBuffers(demo->device, &present_cmd_info,
-                                           &demo->swapchain_image_resources[i].graphics_to_present_cmd);
-            assert(!err);
-            demo_build_image_ownership_cmd(demo, i);
+        for (uint32_t i = 0; i < demo.swapchain_image_count; i++) {
+            err = vkAllocateCommandBuffers(demo.device, &present_cmd_info,
+                                           &demo.swapchain_image_resources[i].graphics_to_present_cmd);
+            _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
+            build_image_ownership_cmd(&demo, i);
         }
     }
-    */
 
-
-    // build_descriptor_pool
-    // build_descriptor_set
+    build_descriptor_pool(&demo);
+    build_descriptor_set(&demo);
 
 
     // build_framebuffers
 
+
+    // draw cmd
+
+    // flush init cmd
 
 #pragma region Main Loop
     // Run the message loop.
