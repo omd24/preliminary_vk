@@ -1537,7 +1537,30 @@ build_descriptor_set (Demo * demo) {
         vkUpdateDescriptorSets(demo->device, 2, writes, 0, NULL);
     }
 }
+static void
+build_framebuffers(Demo *demo) {
+    VkImageView attachments[2];
+    attachments[1] = demo->depth.view;
 
+    const VkFramebufferCreateInfo fb_ci = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .pNext = NULL,
+        .renderPass = demo->renderpass,
+        .attachmentCount = 2,
+        .pAttachments = attachments,
+        .width = demo->width,
+        .height = demo->height,
+        .layers = 1,
+    };
+    VkResult err;
+    uint32_t i;
+
+    for (i = 0; i < demo->swapchain_image_count; i++) {
+        attachments[0] = demo->swapchain_image_resources[i].view;
+        err = vkCreateFramebuffer(demo->device, &fb_ci, NULL, &demo->swapchain_image_resources[i].framebuffer);
+        _ASSERT_EXPR(0 == err, "could not create frame buffers");
+    }
+}
 
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
@@ -2100,7 +2123,7 @@ WinMain (
     build_descriptor_set(&demo);
 
 
-    // build_framebuffers
+    build_framebuffers(&demo);
 
 
     // draw cmd
