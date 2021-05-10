@@ -27,6 +27,7 @@
 #pragma comment(linker, "/subsystem:windows")
 
 // Global variables
+bool global_running = false;
 bool global_suppress_popups = false;
 static int global_validation_error = 0;
 
@@ -250,12 +251,15 @@ typedef struct {
     VkSwapchainKHR              swapchain;
     SwapchainImageResources *   swapchain_image_resources;
     UINT                        swapchain_image_count;
-    bool                        is_minimized;
+    UINT                        current_buffer;
 
     VkFence                     fences[FRAME_LAG];
     int                         frame_index;
     UINT                        cur_frame;
     UINT                        frame_count;
+
+    bool                        is_minimized;
+    bool                        paused;
 
     struct {
         VkFormat                format;
@@ -445,6 +449,7 @@ demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     demo->window = wnd;
     demo->present_mode = VK_PRESENT_MODE_FIFO_KHR;
     demo->validate = true;
+    demo->paused = false;
 }
 static void
 build_backbuffers (Demo * demo) {
@@ -1561,7 +1566,147 @@ build_framebuffers(Demo *demo) {
         _ASSERT_EXPR(0 == err, "could not create frame buffers");
     }
 }
+static void
+draw_cmd_init (Demo * demo, VkCommandBuffer cmd_buf) {
+    VkDebugUtilsLabelEXT label;
+    memset(&label, 0, sizeof(label));
+    VkCommandBufferBeginInfo cmd_buf_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+        .pInheritanceInfo = NULL,
+    };
+    VkClearValue clear_values[2] = {
+        [0] = {.color.float32 = {0.2f, 0.2f, 0.2f, 0.2f}},
+        [1] = {.depthStencil = {1.0f, 0}},
+    };
+    VkRenderPassBeginInfo rp_begin = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext = NULL,
+        .renderPass = demo->renderpass,
+        .framebuffer = demo->swapchain_image_resources[demo->current_buffer].framebuffer,
+        .renderArea.offset.x = 0,
+        .renderArea.offset.y = 0,
+        .renderArea.extent.width = demo->width,
+        .renderArea.extent.height = demo->height,
+        .clearValueCount = 2,
+        .pClearValues = clear_values,
+    };
+    VkResult err;
 
+    err = vkBeginCommandBuffer(cmd_buf, &cmd_buf_info);
+
+    if (demo->validate) {
+        // Set a name for the command buffer
+        VkDebugUtilsObjectNameInfoEXT cmd_buf_name = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+            .pNext = NULL,
+            .objectType = VK_OBJECT_TYPE_COMMAND_BUFFER,
+            .objectHandle = (uint64_t)cmd_buf,
+            .pObjectName = "CubeDrawCommandBuf",
+        };
+        demo->SetDebugUtilsObjectNameEXT(demo->device, &cmd_buf_name);
+
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pNext = NULL;
+        label.pLabelName = "DrawBegin";
+        label.color[0] = 0.4f;
+        label.color[1] = 0.3f;
+        label.color[2] = 0.2f;
+        label.color[3] = 0.1f;
+        demo->CmdBeginDebugUtilsLabelEXT(cmd_buf, &label);
+    }
+    _ASSERT_EXPR(0 == err, "vkBeginCommandBuffer failed");
+
+    vkCmdBeginRenderPass(cmd_buf, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+    if (demo->validate) {
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pNext = NULL;
+        label.pLabelName = "InsideRenderPass";
+        label.color[0] = 8.4f;
+        label.color[1] = 7.3f;
+        label.color[2] = 6.2f;
+        label.color[3] = 7.1f;
+        demo->CmdBeginDebugUtilsLabelEXT(cmd_buf, &label);
+    }
+
+    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, demo->pipeline);
+    vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, demo->pipeline_layout, 0, 1,
+                            &demo->swapchain_image_resources[demo->current_buffer].descriptor_set, 0, NULL);
+    VkViewport viewport;
+    memset(&viewport, 0, sizeof(viewport));
+    float viewport_dimension;
+    if (demo->width < demo->height) {
+        viewport_dimension = (float)demo->width;
+        viewport.y = (demo->height - demo->width) / 2.0f;
+    } else {
+        viewport_dimension = (float)demo->height;
+        viewport.x = (demo->width - demo->height) / 2.0f;
+    }
+    viewport.height = viewport_dimension;
+    viewport.width = viewport_dimension;
+    viewport.minDepth = (float)0.0f;
+    viewport.maxDepth = (float)1.0f;
+    vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
+
+    VkRect2D scissor;
+    memset(&scissor, 0, sizeof(scissor));
+    scissor.extent.width = demo->width;
+    scissor.extent.height = demo->height;
+    scissor.offset.x = 0;
+    scissor.offset.y = 0;
+    vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
+
+    if (demo->validate) {
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pNext = NULL;
+        label.pLabelName = "ActualDraw";
+        label.color[0] = -0.4f;
+        label.color[1] = -0.3f;
+        label.color[2] = -0.2f;
+        label.color[3] = -0.1f;
+        demo->CmdBeginDebugUtilsLabelEXT(cmd_buf, &label);
+    }
+
+    vkCmdDraw(cmd_buf, 12 * 3, 1, 0, 0);
+    if (demo->validate) {
+        demo->CmdEndDebugUtilsLabelEXT(cmd_buf);
+    }
+
+    // Note that ending the renderpass changes the image's layout from
+    // COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
+    vkCmdEndRenderPass(cmd_buf);
+    if (demo->validate) {
+        demo->CmdEndDebugUtilsLabelEXT(cmd_buf);
+    }
+
+    if (demo->separate_present_queue) {
+        // We have to transfer ownership from the graphics queue family to the
+        // present queue family to be able to present.  Note that we don't have
+        // to transfer from present queue family back to graphics queue family at
+        // the start of the next frame because we don't care about the image's
+        // contents at that point.
+        VkImageMemoryBarrier image_ownership_barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                                        .pNext = NULL,
+                                                        .srcAccessMask = 0,
+                                                        .dstAccessMask = 0,
+                                                        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                                        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                                        .srcQueueFamilyIndex = demo->graphics_queue_family_index,
+                                                        .dstQueueFamilyIndex = demo->present_queue_family_index,
+                                                        .image = demo->swapchain_image_resources[demo->current_buffer].image,
+                                                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+
+        vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0,
+                             NULL, 1, &image_ownership_barrier);
+    }
+    if (demo->validate) {
+        demo->CmdEndDebugUtilsLabelEXT(cmd_buf);
+    }
+    err = vkEndCommandBuffer(cmd_buf);
+    _ASSERT_EXPR(0 == err, "vkEndCommandBuffer failed");
+}
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -2125,17 +2270,45 @@ WinMain (
 
     build_framebuffers(&demo);
 
+    
+    for (UINT i = 0; i < demo.swapchain_image_count; i++) {
+        demo.current_buffer = i;
+        draw_cmd_init(&demo, demo.swapchain_image_resources[i].cmd);
+    }
 
-    // draw cmd
 
-    // flush init cmd
+
+    //
+    // flush cmd init
+
+
+    //
+    // implement MS-Windows event handling function:
+
+
 
 #pragma region Main Loop
     // Run the message loop.
+    global_running = true;  // initialize loop condition variable
     MSG msg = {0};
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    while (global_running) {
+        if (demo.paused) {
+            BOOL succ = WaitMessage();
+
+            if (0 == succ) {
+                ERREXIT("WaitMessage() failed on paused demo", "event loop error");
+            }
+        }
+        PeekMessage(&msg, NULL, 0, 0, PM_REMOVE);
+        if (msg.message == WM_QUIT)  // check for a quit message
+        {
+            global_running = false;  // if found, quit app
+        } else {
+            /* Translate and dispatch to event queue*/
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        RedrawWindow(demo.window, NULL, NULL, RDW_INTERNALPAINT);
     }
 #pragma endregion
 
