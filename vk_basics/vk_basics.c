@@ -26,11 +26,6 @@
 // Linker subsystem option
 #pragma comment(linker, "/subsystem:windows")
 
-// Global variables
-bool global_running = false;
-bool global_suppress_popups = false;
-static int global_validation_error = 0;
-
 // Debugging tools
 #if !defined(NDEBUG) && !defined(_DEBUG)
 #error "Define at least one."
@@ -60,8 +55,8 @@ static int global_validation_error = 0;
 // NOTE(omid): Extension functions are not automatically loaded. We have to look up their address ourselves
 #define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                                                                \
     {                                                                                                           \
-        demo.fp##entrypoint = (PFN_vk##entrypoint)vkGetInstanceProcAddr(inst, "vk" #entrypoint);                \
-        if (demo.fp##entrypoint == NULL) {                                                                      \
+        global_demo->fp##entrypoint = (PFN_vk##entrypoint)vkGetInstanceProcAddr(inst, "vk" #entrypoint);                \
+        if (global_demo->fp##entrypoint == NULL) {                                                                      \
             ERREXIT("vkGetInstanceProcAddr failed to find vk" #entrypoint, "vkGetInstanceProcAddr Failure");    \
         }                                                                                                       \
     }
@@ -70,9 +65,9 @@ static PFN_vkGetDeviceProcAddr g_gdpa = NULL;
 
 #define GET_DEVICE_PROC_ADDR(dev, entrypoint)                                                                    \
     {                                                                                                            \
-        if (!g_gdpa) g_gdpa = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(demo.inst, "vkGetDeviceProcAddr"); \
-        demo.fp##entrypoint = (PFN_vk##entrypoint)g_gdpa(dev, "vk" #entrypoint);                                \
-        if (demo.fp##entrypoint == NULL) {                                                                      \
+        if (!g_gdpa) g_gdpa = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(global_demo->inst, "vkGetDeviceProcAddr"); \
+        global_demo->fp##entrypoint = (PFN_vk##entrypoint)g_gdpa(dev, "vk" #entrypoint);                                \
+        if (global_demo->fp##entrypoint == NULL) {                                                                      \
             ERREXIT("vkGetDeviceProcAddr failed to find vk" #entrypoint, "vkGetDeviceProcAddr Failure");        \
         }                                                                                                        \
     }
@@ -260,6 +255,7 @@ typedef struct {
 
     bool                        is_minimized;
     bool                        paused;
+    bool                        prepared;
 
     struct {
         VkFormat                format;
@@ -313,6 +309,13 @@ typedef struct {
 
 } Demo;
 
+// Global variables
+bool global_in_callback = false;
+bool global_running = false;
+bool global_suppress_popups = false;
+static int global_validation_error = 0;
+Demo * global_demo;
+
 static VkBool32
 debug_messenger_callback (
     VkDebugUtilsMessageSeverityFlagBitsEXT msg_severity,
@@ -322,8 +325,8 @@ debug_messenger_callback (
 ) {
     TCHAR prefix[64] = _T("");
     TCHAR * message = (TCHAR *)malloc(strlen(cb_ptr->pMessage) + 5000);
-    Demo * demo = (Demo *)user_data;
-    UNREFERENCED_PARAMETER(demo);
+    Demo * _demo = (Demo *)user_data;
+    UNREFERENCED_PARAMETER(_demo);
 
     //DebugBreak();
 
@@ -387,7 +390,9 @@ debug_messenger_callback (
         }
     }
 
+    global_in_callback = true;
     if (!global_suppress_popups) MessageBox(NULL, message, _T("Alert"), MB_OK);
+    global_in_callback = false;
 
     free(message);
 
@@ -440,7 +445,7 @@ select_surface_format(VkSurfaceFormatKHR *surface_formats, uint32_t count) {
 static void
 demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     _ASSERT_EXPR(demo, _T("Invalid demo pointer"));
-    memset(demo, 0, sizeof(demo));
+    memset(demo, 0, sizeof(*demo));
     demo->width = w;
     demo->height = h;
     demo->gpu_number = -1;
@@ -1711,6 +1716,23 @@ LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
     switch (msg_code) {
+    case WM_PAINT: {
+        // NOTE(omid): don't do anything if in callback (due to message boxes popping upon validation callbacks) 
+        if (0 == global_in_callback) {
+            if (global_demo->prepared) {
+
+                //
+                // draw_main
+
+
+                global_demo->cur_frame++;
+                if (global_demo->frame_count != INT32_MAX && global_demo->cur_frame == global_demo->frame_count) {
+                    PostQuitMessage(global_validation_error);
+                }
+            }
+        }
+    }
+                 break;
     case WM_DESTROY: {
         PostQuitMessage(0);
         result = 0;
@@ -1758,8 +1780,8 @@ WinMain (
 #pragma endregion
 
 #pragma region Vulkan Initial Setup
-    Demo demo = {0};
-    demo_init(&demo, 500, 500, instance, hwnd);
+    global_demo = malloc(sizeof(Demo));
+    demo_init(global_demo, 500, 500, instance, hwnd);
 
     VkResult err = VK_NOT_READY;
     UINT instance_ext_count = 0;
@@ -1770,7 +1792,7 @@ WinMain (
     // Look for validation layer
     //
     VkBool32 validation_found = 0;
-    if (demo.validate) {
+    if (global_demo->validate) {
         err = vkEnumerateInstanceLayerProperties(&instance_layer_count, NULL);
         _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceLayerProperties failed"));
 
@@ -1782,8 +1804,8 @@ WinMain (
             validation_found = demo_check_layers(_countof(instance_validation_layers), instance_validation_layers,
                                                  instance_layer_count, instance_layers);
             if (validation_found) {
-                demo.enabled_layer_count = _countof(instance_validation_layers);
-                demo.enabled_layers[0] = "VK_LAYER_KHRONOS_validation";
+                global_demo->enabled_layer_count = _countof(instance_validation_layers);
+                global_demo->enabled_layers[0] = "VK_LAYER_KHRONOS_validation";
             }
             free(instance_layers);
         }
@@ -1800,7 +1822,7 @@ WinMain (
     //
     VkBool32 suface_ext_found = 0;
     VkBool32 platform_surface_ext_found = 0;
-    memset(demo.ext_names, 0, sizeof(demo.ext_names));
+    memset(global_demo->ext_names, 0, sizeof(global_demo->ext_names));
     err = vkEnumerateInstanceExtensionProperties(NULL, &instance_ext_count, NULL);
     _ASSERT_EXPR(0 == err, _T("vkEnumerateInstanceExtensionProperties failed"));
     if (instance_ext_count > 0) {
@@ -1810,20 +1832,20 @@ WinMain (
         for (UINT i = 0; i < instance_ext_count; ++i) {
             if (0 == strcmp(VK_KHR_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 suface_ext_found = 1;
-                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
+                global_demo->ext_names[global_demo->enabled_ext_count++] = VK_KHR_SURFACE_EXTENSION_NAME;
             }
             if (0 == strcmp(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, instance_exts[i].extensionName)) {
                 platform_surface_ext_found = 1;
-                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+                global_demo->ext_names[global_demo->enabled_ext_count++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
             }
             if (0 == strcmp(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, instance_exts[i].extensionName)) {
-                if (demo.validate)
-                    demo.ext_names[demo.enabled_ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+                if (global_demo->validate)
+                    global_demo->ext_names[global_demo->enabled_ext_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
             }
             if (0 == strcmp(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, instance_exts[i].extensionName)) {
-                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+                global_demo->ext_names[global_demo->enabled_ext_count++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
             }
-            _ASSERT_EXPR(demo.enabled_ext_count < 64, _T("Enabled extension counts exceeded upperbound!"));
+            _ASSERT_EXPR(global_demo->enabled_ext_count < 64, _T("Enabled extension counts exceeded upperbound!"));
         }
         free(instance_exts);
     }
@@ -1856,17 +1878,17 @@ WinMain (
     inst_info.pNext = NULL;
     inst_info.flags = 0;
     inst_info.pApplicationInfo = &app_info;
-    inst_info.enabledLayerCount = demo.enabled_layer_count;
+    inst_info.enabledLayerCount = global_demo->enabled_layer_count;
     inst_info.ppEnabledLayerNames = (char const * const *)instance_validation_layers;
-    inst_info.enabledExtensionCount = demo.enabled_ext_count;
-    inst_info.ppEnabledExtensionNames = (char const * const *)demo.ext_names;
+    inst_info.enabledExtensionCount = global_demo->enabled_ext_count;
+    inst_info.ppEnabledExtensionNames = (char const * const *)global_demo->ext_names;
 
     // NOTE(omid): for vkCreateInstance we need a temp callback 
     // After creating the instance we can register our debug callback
     // using instance-based function
 
     VkDebugUtilsMessengerCreateInfoEXT dbg_msg_create_info = {0};
-    if (demo.validate) {
+    if (global_demo->validate) {
         dbg_msg_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         dbg_msg_create_info.pNext = NULL;
         dbg_msg_create_info.flags = 0;
@@ -1881,7 +1903,7 @@ WinMain (
         inst_info.pNext = &dbg_msg_create_info;
     }
 
-    err = vkCreateInstance(&inst_info, NULL, &demo.inst);
+    err = vkCreateInstance(&inst_info, NULL, &global_demo->inst);
     if (err == VK_ERROR_INCOMPATIBLE_DRIVER) {
         ERREXIT(
             "Cannot find a compatible Vulkan installable client driver (ICD)\n"
@@ -1906,17 +1928,17 @@ WinMain (
     // Enumerate physical devices
     //
     UINT gpu_count = 0;
-    err = vkEnumeratePhysicalDevices(demo.inst, &gpu_count, NULL);
+    err = vkEnumeratePhysicalDevices(global_demo->inst, &gpu_count, NULL);
     if (gpu_count < 1)
         ERREXIT("vkEnumeratePhysicalDevices reported zero device??\n", "vkEnumeratePhysicalDevices failed");
     VkPhysicalDevice * physical_devices = (VkPhysicalDevice *)calloc(gpu_count, sizeof(VkPhysicalDevice));
-    err = vkEnumeratePhysicalDevices(demo.inst, &gpu_count, physical_devices);
+    err = vkEnumeratePhysicalDevices(global_demo->inst, &gpu_count, physical_devices);
     _ASSERT_EXPR(0 == err, _T("Filling physical_devices array failed"));
 
     //
     // Auto-select suitable device
     //
-    if (demo.gpu_number == -1) {
+    if (global_demo->gpu_number == -1) {
         UINT count_device_type[VK_PHYSICAL_DEVICE_TYPE_CPU + 1] = {0};
         VkPhysicalDeviceProperties device_props = {0};
         for (UINT i = 0; i < gpu_count; i++) {
@@ -1938,19 +1960,19 @@ WinMain (
         for (UINT i = 0; i < gpu_count; i++) {
             vkGetPhysicalDeviceProperties(physical_devices[i], &device_props);
             if (device_props.deviceType == search_for_device_type) {
-                demo.gpu_number = i;
+                global_demo->gpu_number = i;
                 break;
             }
         }
     }
-    _ASSERT_EXPR(demo.gpu_number >= 0, _T("Could not select device"));
+    _ASSERT_EXPR(global_demo->gpu_number >= 0, _T("Could not select device"));
     if (physical_devices)
-        demo.gpu = physical_devices[demo.gpu_number];
+        global_demo->gpu = physical_devices[global_demo->gpu_number];
     {
         VkPhysicalDeviceProperties device_props = {0};
-        vkGetPhysicalDeviceProperties(demo.gpu, &device_props);
+        vkGetPhysicalDeviceProperties(global_demo->gpu, &device_props);
         TCHAR buf[250];
-        _stprintf(buf, _T("Selected gpu %d: %hs, type: %u\n"), demo.gpu_number, device_props.deviceName, device_props.deviceType);
+        _stprintf(buf, _T("Selected gpu %d: %hs, type: %u\n"), global_demo->gpu_number, device_props.deviceName, device_props.deviceType);
         OutputDebugString(buf);
     }
     free(physical_devices);
@@ -1960,26 +1982,26 @@ WinMain (
     //
     UINT device_extension_count = 0;
     VkBool32 swapchain_ext_found = 0;
-    demo.enabled_ext_count = 0;
-    memset(demo.ext_names, 0, sizeof(demo.ext_names));
+    global_demo->enabled_ext_count = 0;
+    memset(global_demo->ext_names, 0, sizeof(global_demo->ext_names));
 
-    err = vkEnumerateDeviceExtensionProperties(demo.gpu, NULL, &device_extension_count, NULL);
+    err = vkEnumerateDeviceExtensionProperties(global_demo->gpu, NULL, &device_extension_count, NULL);
     _ASSERT_EXPR(0 == err, _T("Failed to enumerate device extensions"));
     if (device_extension_count > 0) {
         VkExtensionProperties * device_extensions =
             calloc(device_extension_count, sizeof(VkExtensionProperties));
-        err = vkEnumerateDeviceExtensionProperties(demo.gpu, NULL, &device_extension_count, device_extensions);
+        err = vkEnumerateDeviceExtensionProperties(global_demo->gpu, NULL, &device_extension_count, device_extensions);
         _ASSERT_EXPR(0 == err, _T("Failed to enumerate device extensions"));
 
         for (UINT i = 0; i < device_extension_count; ++i) {
             if (0 == strcmp(VK_KHR_SWAPCHAIN_EXTENSION_NAME, device_extensions[i].extensionName)) {
                 swapchain_ext_found = 1;
-                demo.ext_names[demo.enabled_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+                global_demo->ext_names[global_demo->enabled_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
             }
             if (0 == strcmp("VK_KHR_portability_subset", device_extensions[i].extensionName)) {
-                demo.ext_names[demo.enabled_ext_count++] = "VK_KHR_portability_subset";
+                global_demo->ext_names[global_demo->enabled_ext_count++] = "VK_KHR_portability_subset";
             }
-            _ASSERT_EXPR(demo.enabled_ext_count < 64, _T("Invalid enabled ext count"));
+            _ASSERT_EXPR(global_demo->enabled_ext_count < 64, _T("Invalid enabled ext count"));
         }
 
         // TODO(omid): handle other extensions such as
@@ -1998,32 +2020,32 @@ WinMain (
     //
     // Setup VK_EXT_debug_utils function pointers
     //
-    if (demo.validate) {
-        demo.CreateDebugUtilsMessengerEXT =
-            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkCreateDebugUtilsMessengerEXT");
-        demo.DestroyDebugUtilsMessengerEXT =
-            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(demo.inst, "vkDestroyDebugUtilsMessengerEXT");
-        demo.SubmitDebugUtilsMessageEXT =
-            (PFN_vkSubmitDebugUtilsMessageEXT)vkGetInstanceProcAddr(demo.inst, "vkSubmitDebugUtilsMessageEXT");
-        demo.CmdBeginDebugUtilsLabelEXT =
-            (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdBeginDebugUtilsLabelEXT");
-        demo.CmdEndDebugUtilsLabelEXT =
-            (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdEndDebugUtilsLabelEXT");
-        demo.CmdInsertDebugUtilsLabelEXT =
-            (PFN_vkCmdInsertDebugUtilsLabelEXT)vkGetInstanceProcAddr(demo.inst, "vkCmdInsertDebugUtilsLabelEXT");
-        demo.SetDebugUtilsObjectNameEXT =
-            (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(demo.inst, "vkSetDebugUtilsObjectNameEXT");
+    if (global_demo->validate) {
+        global_demo->CreateDebugUtilsMessengerEXT =
+            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(global_demo->inst, "vkCreateDebugUtilsMessengerEXT");
+        global_demo->DestroyDebugUtilsMessengerEXT =
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(global_demo->inst, "vkDestroyDebugUtilsMessengerEXT");
+        global_demo->SubmitDebugUtilsMessageEXT =
+            (PFN_vkSubmitDebugUtilsMessageEXT)vkGetInstanceProcAddr(global_demo->inst, "vkSubmitDebugUtilsMessageEXT");
+        global_demo->CmdBeginDebugUtilsLabelEXT =
+            (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(global_demo->inst, "vkCmdBeginDebugUtilsLabelEXT");
+        global_demo->CmdEndDebugUtilsLabelEXT =
+            (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(global_demo->inst, "vkCmdEndDebugUtilsLabelEXT");
+        global_demo->CmdInsertDebugUtilsLabelEXT =
+            (PFN_vkCmdInsertDebugUtilsLabelEXT)vkGetInstanceProcAddr(global_demo->inst, "vkCmdInsertDebugUtilsLabelEXT");
+        global_demo->SetDebugUtilsObjectNameEXT =
+            (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(global_demo->inst, "vkSetDebugUtilsObjectNameEXT");
 
         if (
-            NULL == demo.CreateDebugUtilsMessengerEXT || NULL == demo.DestroyDebugUtilsMessengerEXT ||
-            NULL == demo.SubmitDebugUtilsMessageEXT || NULL == demo.CmdBeginDebugUtilsLabelEXT ||
-            NULL == demo.CmdEndDebugUtilsLabelEXT || NULL == demo.CmdInsertDebugUtilsLabelEXT ||
-            NULL == demo.SetDebugUtilsObjectNameEXT
+            NULL == global_demo->CreateDebugUtilsMessengerEXT || NULL == global_demo->DestroyDebugUtilsMessengerEXT ||
+            NULL == global_demo->SubmitDebugUtilsMessageEXT || NULL == global_demo->CmdBeginDebugUtilsLabelEXT ||
+            NULL == global_demo->CmdEndDebugUtilsLabelEXT || NULL == global_demo->CmdInsertDebugUtilsLabelEXT ||
+            NULL == global_demo->SetDebugUtilsObjectNameEXT
             ) {
             ERREXIT("GetProcAddr: Failed to init VK_EXT_debug_utils\n", "GetProcAddr: Failure");
         }
 
-        err = demo.CreateDebugUtilsMessengerEXT(demo.inst, &dbg_msg_create_info, NULL, &demo.dbg_messenger);
+        err = global_demo->CreateDebugUtilsMessengerEXT(global_demo->inst, &dbg_msg_create_info, NULL, &global_demo->dbg_messenger);
         switch (err) {
         case VK_SUCCESS:
             break;
@@ -2035,24 +2057,24 @@ WinMain (
             break;
         }
     }
-    vkGetPhysicalDeviceProperties(demo.gpu, &demo.gpu_props);
+    vkGetPhysicalDeviceProperties(global_demo->gpu, &global_demo->gpu_props);
 
-    vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, NULL);
-    _ASSERT_EXPR(demo.queue_family_count > 0, "Not enough queue family count");
-    demo.queue_props = (VkQueueFamilyProperties *)calloc(demo.queue_family_count, sizeof(VkQueueFamilyProperties));
-    vkGetPhysicalDeviceQueueFamilyProperties(demo.gpu, &demo.queue_family_count, demo.queue_props);
+    vkGetPhysicalDeviceQueueFamilyProperties(global_demo->gpu, &global_demo->queue_family_count, NULL);
+    _ASSERT_EXPR(global_demo->queue_family_count > 0, "Not enough queue family count");
+    global_demo->queue_props = (VkQueueFamilyProperties *)calloc(global_demo->queue_family_count, sizeof(VkQueueFamilyProperties));
+    vkGetPhysicalDeviceQueueFamilyProperties(global_demo->gpu, &global_demo->queue_family_count, global_demo->queue_props);
 
     //
     // Query feature support for device (if needed)
     //
     VkPhysicalDeviceFeatures physDevFeatures;
-    vkGetPhysicalDeviceFeatures(demo.gpu, &physDevFeatures);
+    vkGetPhysicalDeviceFeatures(global_demo->gpu, &physDevFeatures);
 
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceSupportKHR);
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceCapabilitiesKHR);
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfaceFormatsKHR);
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetPhysicalDeviceSurfacePresentModesKHR);
-    GET_INSTANCE_PROC_ADDR(demo.inst, GetSwapchainImagesKHR);
+    GET_INSTANCE_PROC_ADDR(global_demo->inst, GetPhysicalDeviceSurfaceSupportKHR);
+    GET_INSTANCE_PROC_ADDR(global_demo->inst, GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    GET_INSTANCE_PROC_ADDR(global_demo->inst, GetPhysicalDeviceSurfaceFormatsKHR);
+    GET_INSTANCE_PROC_ADDR(global_demo->inst, GetPhysicalDeviceSurfacePresentModesKHR);
+    GET_INSTANCE_PROC_ADDR(global_demo->inst, GetSwapchainImagesKHR);
 
 #pragma region Init Swapchain
     //
@@ -2061,20 +2083,20 @@ WinMain (
     VkWin32SurfaceCreateInfoKHR surface_info = {0};
     surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
     surface_info.pNext = NULL;
-    surface_info.hinstance = demo.connection;
-    surface_info.hwnd = demo.window;
-    err = vkCreateWin32SurfaceKHR(demo.inst, &surface_info, NULL, &demo.surface);
+    surface_info.hinstance = global_demo->connection;
+    surface_info.hwnd = global_demo->window;
+    err = vkCreateWin32SurfaceKHR(global_demo->inst, &surface_info, NULL, &global_demo->surface);
     _ASSERT_EXPR(0 == err, _T("vkCreateWin32SurfaceKHR failed"));
-    VkBool32 * supports_presents = (VkBool32 *)calloc(demo.queue_family_count, sizeof(VkBool32));
-    for (UINT i = 0; i < demo.queue_family_count; ++i) {
-        demo.fpGetPhysicalDeviceSurfaceSupportKHR(demo.gpu, i, demo.surface, &supports_presents[i]);
+    VkBool32 * supports_presents = (VkBool32 *)calloc(global_demo->queue_family_count, sizeof(VkBool32));
+    for (UINT i = 0; i < global_demo->queue_family_count; ++i) {
+        global_demo->fpGetPhysicalDeviceSurfaceSupportKHR(global_demo->gpu, i, global_demo->surface, &supports_presents[i]);
     }
     // Search for a graphics and a present queue in the array of queue
     // families, try to find one that supports both
     UINT graphics_qfamid = UINT32_MAX;
     UINT present_qfamid = UINT32_MAX;
-    for (UINT i = 0; i < demo.queue_family_count; i++) {
-        if ((demo.queue_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+    for (UINT i = 0; i < global_demo->queue_family_count; i++) {
+        if ((global_demo->queue_props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
             if (graphics_qfamid == UINT32_MAX) {
                 graphics_qfamid = i;
             }
@@ -2089,7 +2111,7 @@ WinMain (
     if (present_qfamid == UINT32_MAX) {
         // If didn't find a queue that supports both graphics and present, then
         // find a separate present queue.
-        for (uint32_t i = 0; i < demo.queue_family_count; ++i) {
+        for (uint32_t i = 0; i < global_demo->queue_family_count; ++i) {
             if (supports_presents[i] == VK_TRUE) {
                 present_qfamid = i;
                 break;
@@ -2101,9 +2123,9 @@ WinMain (
         ERREXIT("Could not find both graphics and present queues\n", "Swapchain Initialization Failure");
     }
 
-    demo.graphics_queue_family_index = graphics_qfamid;
-    demo.present_queue_family_index = present_qfamid;
-    demo.separate_present_queue = (demo.graphics_queue_family_index != demo.present_queue_family_index);
+    global_demo->graphics_queue_family_index = graphics_qfamid;
+    global_demo->present_queue_family_index = present_qfamid;
+    global_demo->separate_present_queue = (global_demo->graphics_queue_family_index != global_demo->present_queue_family_index);
     free(supports_presents);
 
     //
@@ -2113,7 +2135,7 @@ WinMain (
     VkDeviceQueueCreateInfo queue_info = {0};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queue_info.pNext = NULL;
-    queue_info.queueFamilyIndex = demo.graphics_queue_family_index;
+    queue_info.queueFamilyIndex = global_demo->graphics_queue_family_index;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = queue_priorites;
 
@@ -2122,41 +2144,41 @@ WinMain (
     device_info.pNext = NULL;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
-    device_info.enabledExtensionCount = demo.enabled_ext_count;
-    device_info.ppEnabledExtensionNames = (char const * const *)demo.ext_names;
+    device_info.enabledExtensionCount = global_demo->enabled_ext_count;
+    device_info.ppEnabledExtensionNames = (char const * const *)global_demo->ext_names;
     device_info.enabledLayerCount = 0;
     device_info.ppEnabledLayerNames = NULL;
     device_info.pEnabledFeatures = NULL;
 
-    err = vkCreateDevice(demo.gpu, &device_info, NULL, &demo.device);
+    err = vkCreateDevice(global_demo->gpu, &device_info, NULL, &global_demo->device);
     _ASSERT_EXPR(0 == err, _T("vkCreateDevice failed"));
 
-    GET_DEVICE_PROC_ADDR(demo.device, CreateSwapchainKHR);
-    GET_DEVICE_PROC_ADDR(demo.device, DestroySwapchainKHR);
-    GET_DEVICE_PROC_ADDR(demo.device, GetSwapchainImagesKHR);
-    GET_DEVICE_PROC_ADDR(demo.device, AcquireNextImageKHR);
-    GET_DEVICE_PROC_ADDR(demo.device, QueuePresentKHR);
+    GET_DEVICE_PROC_ADDR(global_demo->device, CreateSwapchainKHR);
+    GET_DEVICE_PROC_ADDR(global_demo->device, DestroySwapchainKHR);
+    GET_DEVICE_PROC_ADDR(global_demo->device, GetSwapchainImagesKHR);
+    GET_DEVICE_PROC_ADDR(global_demo->device, AcquireNextImageKHR);
+    GET_DEVICE_PROC_ADDR(global_demo->device, QueuePresentKHR);
 
-    vkGetDeviceQueue(demo.device, demo.graphics_queue_family_index, 0, &demo.graphics_queue);
+    vkGetDeviceQueue(global_demo->device, global_demo->graphics_queue_family_index, 0, &global_demo->graphics_queue);
 
-    if (!demo.separate_present_queue)
-        demo.present_queue = demo.graphics_queue;
+    if (!global_demo->separate_present_queue)
+        global_demo->present_queue = global_demo->graphics_queue;
     else
-        vkGetDeviceQueue(demo.device, demo.present_queue_family_index, 0, &demo.present_queue);
+        vkGetDeviceQueue(global_demo->device, global_demo->present_queue_family_index, 0, &global_demo->present_queue);
 
     // -- get a list of VkFormat's that are supported:
     UINT format_count;
-    err = demo.fpGetPhysicalDeviceSurfaceFormatsKHR(demo.gpu, demo.surface, &format_count, NULL);
+    err = global_demo->fpGetPhysicalDeviceSurfaceFormatsKHR(global_demo->gpu, global_demo->surface, &format_count, NULL);
     _ASSERT_EXPR(0 == err, _T("fpGetPhysicalDeviceSurfaceFormatsKHR failed"));
     VkSurfaceFormatKHR * surface_formats = (VkSurfaceFormatKHR *)calloc(format_count, sizeof(VkSurfaceFormatKHR));
-    err = demo.fpGetPhysicalDeviceSurfaceFormatsKHR(demo.gpu, demo.surface, &format_count, surface_formats);
+    err = global_demo->fpGetPhysicalDeviceSurfaceFormatsKHR(global_demo->gpu, global_demo->surface, &format_count, surface_formats);
     _ASSERT_EXPR(0 == err, _T("fpGetPhysicalDeviceSurfaceFormatsKHR failed"));
     VkSurfaceFormatKHR selected_format = select_surface_format(surface_formats, format_count);
-    demo.format = selected_format.format;
-    demo.color_space = selected_format.colorSpace;
+    global_demo->format = selected_format.format;
+    global_demo->color_space = selected_format.colorSpace;
     free(surface_formats);
 
-    demo.cur_frame = 0;
+    global_demo->cur_frame = 0;
 
     // -- create semaphores to synchronize acquiring presentable buffers before
     //    rendering and waiting for drawing to be complete before presenting
@@ -2171,44 +2193,44 @@ WinMain (
     VkFenceCreateInfo fence_ci = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     for (uint32_t i = 0; i < FRAME_LAG; i++) {
-        err = vkCreateFence(demo.device, &fence_ci, NULL, &demo.fences[i]);
+        err = vkCreateFence(global_demo->device, &fence_ci, NULL, &global_demo->fences[i]);
         _ASSERT_EXPR(0 == err, "vkCreateFence failed");
 
-        err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_acquired_semaphores[i]);
+        err = vkCreateSemaphore(global_demo->device, &semaphore_ci, NULL, &global_demo->image_acquired_semaphores[i]);
         _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
 
-        err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.draw_complete_semaphores[i]);
+        err = vkCreateSemaphore(global_demo->device, &semaphore_ci, NULL, &global_demo->draw_complete_semaphores[i]);
         _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
 
-        if (demo.separate_present_queue) {
-            err = vkCreateSemaphore(demo.device, &semaphore_ci, NULL, &demo.image_ownership_semaphores[i]);
+        if (global_demo->separate_present_queue) {
+            err = vkCreateSemaphore(global_demo->device, &semaphore_ci, NULL, &global_demo->image_ownership_semaphores[i]);
             _ASSERT_EXPR(0 == err, "vkCreateSemaphore failed");
         }
     }
-    demo.frame_index = 0;
+    global_demo->frame_index = 0;
 
     // -- get Memory information and properties
-    vkGetPhysicalDeviceMemoryProperties(demo.gpu, &demo.memory_properties);
+    vkGetPhysicalDeviceMemoryProperties(global_demo->gpu, &global_demo->memory_properties);
 #pragma endregion
     //
     //  Initi command buffer
     //
-    if (demo.cmd_pool == VK_NULL_HANDLE) {
+    if (global_demo->cmd_pool == VK_NULL_HANDLE) {
         VkCommandPoolCreateInfo pool_ci = {0};
         pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         pool_ci.pNext = NULL;
-        pool_ci.queueFamilyIndex = demo.graphics_queue_family_index;
+        pool_ci.queueFamilyIndex = global_demo->graphics_queue_family_index;
         pool_ci.flags = 0;
-        err = vkCreateCommandPool(demo.device, &pool_ci, NULL, &demo.cmd_pool);
+        err = vkCreateCommandPool(global_demo->device, &pool_ci, NULL, &global_demo->cmd_pool);
         _ASSERT_EXPR(0 == err, _T("vkCreateCommandPool failed"));
     }
     VkCommandBufferAllocateInfo cmd_buf_alloc_ci = {0};
     cmd_buf_alloc_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cmd_buf_alloc_ci.pNext = NULL;
-    cmd_buf_alloc_ci.commandPool = demo.cmd_pool;
+    cmd_buf_alloc_ci.commandPool = global_demo->cmd_pool;
     cmd_buf_alloc_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cmd_buf_alloc_ci.commandBufferCount = 1;
-    err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_ci, &demo.cmd_buf);
+    err = vkAllocateCommandBuffers(global_demo->device, &cmd_buf_alloc_ci, &global_demo->cmd_buf);
     _ASSERT_EXPR(0 == err, _T("vkAllocateCommandBuffers failed"));
 
     VkCommandBufferBeginInfo cmd_buf_begin_ci = {0};
@@ -2216,64 +2238,64 @@ WinMain (
     cmd_buf_begin_ci.pNext = NULL;
     cmd_buf_begin_ci.flags = 0;
     cmd_buf_begin_ci.pInheritanceInfo = NULL;
-    err = vkBeginCommandBuffer(demo.cmd_buf, &cmd_buf_begin_ci);
+    err = vkBeginCommandBuffer(global_demo->cmd_buf, &cmd_buf_begin_ci);
     _ASSERT_EXPR(0 == err, _T("vkBeginCommandBuffer failed"));
 
 #pragma endregion
 
-    build_backbuffers(&demo);
+    build_backbuffers(global_demo);
 
-    build_depthbuffer(&demo);
+    build_depthbuffer(global_demo);
 
-    build_textures(&demo);
+    build_textures(global_demo);
 
-    build_cube(&demo);
+    build_cube(global_demo);
 
-    build_descriptor_layout(&demo);
+    build_descriptor_layout(global_demo);
 
-    build_renderpass(&demo);
+    build_renderpass(global_demo);
 
-    build_pipeline(&demo);
+    build_pipeline(global_demo);
 
-    for (uint32_t i = 0; i < demo.swapchain_image_count; i++) {
-        err = vkAllocateCommandBuffers(demo.device, &cmd_buf_alloc_ci, &demo.swapchain_image_resources[i].cmd);
+    for (uint32_t i = 0; i < global_demo->swapchain_image_count; i++) {
+        err = vkAllocateCommandBuffers(global_demo->device, &cmd_buf_alloc_ci, &global_demo->swapchain_image_resources[i].cmd);
         _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
     }
 
-    if (demo.separate_present_queue) {
+    if (global_demo->separate_present_queue) {
         const VkCommandPoolCreateInfo present_cmd_pool_info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .pNext = NULL,
-            .queueFamilyIndex = demo.present_queue_family_index,
+            .queueFamilyIndex = global_demo->present_queue_family_index,
             .flags = 0,
         };
-        err = vkCreateCommandPool(demo.device, &present_cmd_pool_info, NULL, &demo.cmd_pool_present);
+        err = vkCreateCommandPool(global_demo->device, &present_cmd_pool_info, NULL, &global_demo->cmd_pool_present);
         _ASSERT_EXPR(0 == err, "vkCreateCommandPool failed");
         const VkCommandBufferAllocateInfo present_cmd_info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = NULL,
-            .commandPool = demo.cmd_pool_present,
+            .commandPool = global_demo->cmd_pool_present,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1,
         };
-        for (uint32_t i = 0; i < demo.swapchain_image_count; i++) {
-            err = vkAllocateCommandBuffers(demo.device, &present_cmd_info,
-                                           &demo.swapchain_image_resources[i].graphics_to_present_cmd);
+        for (uint32_t i = 0; i < global_demo->swapchain_image_count; i++) {
+            err = vkAllocateCommandBuffers(global_demo->device, &present_cmd_info,
+                                           &global_demo->swapchain_image_resources[i].graphics_to_present_cmd);
             _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
-            build_image_ownership_cmd(&demo, i);
+            build_image_ownership_cmd(global_demo, i);
         }
     }
 
-    build_descriptor_pool(&demo);
-    build_descriptor_set(&demo);
+    build_descriptor_pool(global_demo);
+    build_descriptor_set(global_demo);
 
 
-    build_framebuffers(&demo);
+    build_framebuffers(global_demo);
 
-    
-    for (UINT i = 0; i < demo.swapchain_image_count; i++) {
-        demo.current_buffer = i;
-        draw_cmd_init(&demo, demo.swapchain_image_resources[i].cmd);
+
+    for (UINT i = 0; i < global_demo->swapchain_image_count; i++) {
+        global_demo->current_buffer = i;
+        draw_cmd_init(global_demo, global_demo->swapchain_image_resources[i].cmd);
     }
 
 
@@ -2286,13 +2308,15 @@ WinMain (
     // implement MS-Windows event handling function:
 
 
+    global_demo->current_buffer = 0;
+    global_demo->prepared = true;
 
 #pragma region Main Loop
     // Run the message loop.
     global_running = true;  // initialize loop condition variable
     MSG msg = {0};
     while (global_running) {
-        if (demo.paused) {
+        if (global_demo->paused) {
             BOOL succ = WaitMessage();
 
             if (0 == succ) {
@@ -2308,7 +2332,7 @@ WinMain (
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        RedrawWindow(demo.window, NULL, NULL, RDW_INTERNALPAINT);
+        RedrawWindow(global_demo->window, NULL, NULL, RDW_INTERNALPAINT);
     }
 #pragma endregion
 
