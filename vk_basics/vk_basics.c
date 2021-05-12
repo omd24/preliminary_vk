@@ -1712,6 +1712,328 @@ draw_cmd_init (Demo * demo, VkCommandBuffer cmd_buf) {
     err = vkEndCommandBuffer(cmd_buf);
     _ASSERT_EXPR(0 == err, "vkEndCommandBuffer failed");
 }
+static void
+build_surface (Demo * demo) {
+    VkResult err;
+    VkWin32SurfaceCreateInfoKHR surface_info = {0};
+    surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    surface_info.pNext = NULL;
+    surface_info.hinstance = demo->connection;
+    surface_info.hwnd = demo->window;
+    err = vkCreateWin32SurfaceKHR(demo->inst, &surface_info, NULL, &demo->surface);
+    _ASSERT_EXPR(0 == err, _T("vkCreateWin32SurfaceKHR failed"));
+}
+static void 
+flush_cmd_init (Demo * demo) {
+    VkResult err;
+
+    // This function could get called twice if the texture uses a staging buffer
+    // In that case the second call should be ignored
+    if (demo->cmd_buf == VK_NULL_HANDLE) return;
+
+    err = vkEndCommandBuffer(demo->cmd_buf);
+    _ASSERT_EXPR(0 == err, "error flushing cmd buf");
+
+    VkFence fence;
+    VkFenceCreateInfo fence_ci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = NULL, .flags = 0};
+    err = vkCreateFence(demo->device, &fence_ci, NULL, &fence);
+    _ASSERT_EXPR(0 == err, "error flushing cmd buf");
+
+    const VkCommandBuffer cmd_bufs[] = {demo->cmd_buf};
+    VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                .pNext = NULL,
+                                .waitSemaphoreCount = 0,
+                                .pWaitSemaphores = NULL,
+                                .pWaitDstStageMask = NULL,
+                                .commandBufferCount = 1,
+                                .pCommandBuffers = cmd_bufs,
+                                .signalSemaphoreCount = 0,
+                                .pSignalSemaphores = NULL};
+
+    err = vkQueueSubmit(demo->graphics_queue, 1, &submit_info, fence);
+    _ASSERT_EXPR(0 == err, "error flushing cmd buf");
+
+    err = vkWaitForFences(demo->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    _ASSERT_EXPR(0 == err, "error flushing cmd buf");
+
+    vkFreeCommandBuffers(demo->device, demo->cmd_pool, 1, cmd_bufs);
+    vkDestroyFence(demo->device, fence, NULL);
+    demo->cmd_buf = VK_NULL_HANDLE;
+}
+
+static void 
+destroy_texture (Demo * demo, TextureObject * tex_objs) {
+    /* clean up staging resources */
+    vkFreeMemory(demo->device, tex_objs->mem, NULL);
+    if (tex_objs->image) vkDestroyImage(demo->device, tex_objs->image, NULL);
+    if (tex_objs->buffer) vkDestroyBuffer(demo->device, tex_objs->buffer, NULL);
+}
+static void
+demo_prepare (Demo * demo) {
+    VkResult err;
+    //
+    //  Initi command buffer
+    //
+    if (demo->cmd_pool == VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo pool_ci = {0};
+        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_ci.pNext = NULL;
+        pool_ci.queueFamilyIndex = demo->graphics_queue_family_index;
+        pool_ci.flags = 0;
+        err = vkCreateCommandPool(demo->device, &pool_ci, NULL, &demo->cmd_pool);
+        _ASSERT_EXPR(0 == err, _T("vkCreateCommandPool failed"));
+    }
+    VkCommandBufferAllocateInfo cmd_buf_alloc_ci = {0};
+    cmd_buf_alloc_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_buf_alloc_ci.pNext = NULL;
+    cmd_buf_alloc_ci.commandPool = demo->cmd_pool;
+    cmd_buf_alloc_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_buf_alloc_ci.commandBufferCount = 1;
+    err = vkAllocateCommandBuffers(demo->device, &cmd_buf_alloc_ci, &demo->cmd_buf);
+    _ASSERT_EXPR(0 == err, _T("vkAllocateCommandBuffers failed"));
+
+    VkCommandBufferBeginInfo cmd_buf_begin_ci = {0};
+    cmd_buf_begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cmd_buf_begin_ci.pNext = NULL;
+    cmd_buf_begin_ci.flags = 0;
+    cmd_buf_begin_ci.pInheritanceInfo = NULL;
+    err = vkBeginCommandBuffer(demo->cmd_buf, &cmd_buf_begin_ci);
+    _ASSERT_EXPR(0 == err, _T("vkBeginCommandBuffer failed"));
+
+    build_backbuffers(demo);
+
+    if (demo->is_minimized) {
+        demo->prepared = false;
+        return;
+    }
+
+    build_depthbuffer(demo);
+
+    build_textures(demo);
+
+    build_cube(demo);
+
+    build_descriptor_layout(demo);
+
+    build_renderpass(demo);
+
+    build_pipeline(demo);
+
+    for (uint32_t i = 0; i < demo->swapchain_image_count; i++) {
+        err = vkAllocateCommandBuffers(demo->device, &cmd_buf_alloc_ci, &demo->swapchain_image_resources[i].cmd);
+        _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
+    }
+
+    if (demo->separate_present_queue) {
+        const VkCommandPoolCreateInfo present_cmd_pool_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .pNext = NULL,
+            .queueFamilyIndex = demo->present_queue_family_index,
+            .flags = 0,
+        };
+        err = vkCreateCommandPool(demo->device, &present_cmd_pool_info, NULL, &demo->cmd_pool_present);
+        _ASSERT_EXPR(0 == err, "vkCreateCommandPool failed");
+        const VkCommandBufferAllocateInfo present_cmd_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = NULL,
+            .commandPool = demo->cmd_pool_present,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        for (uint32_t i = 0; i < demo->swapchain_image_count; i++) {
+            err = vkAllocateCommandBuffers(demo->device, &present_cmd_info,
+                                           &demo->swapchain_image_resources[i].graphics_to_present_cmd);
+            _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
+            build_image_ownership_cmd(demo, i);
+        }
+    }
+
+    build_descriptor_pool(demo);
+    build_descriptor_set(demo);
+
+    build_framebuffers(demo);
+
+    for (UINT i = 0; i < demo->swapchain_image_count; i++) {
+        demo->current_buffer = i;
+        draw_cmd_init(demo, demo->swapchain_image_resources[i].cmd);
+    }
+
+    /*
+     * Prepare functions above may generate pipeline commands
+     * that need to be flushed before beginning the render loop.
+     */
+    flush_cmd_init (demo);
+    if (demo->staging_texture.buffer) {
+        destroy_texture(demo, &demo->staging_texture);
+    }
+
+    demo->current_buffer = 0;
+    demo->prepared = true;
+}
+static void
+demo_resize (Demo * demo) {
+uint32_t i;
+
+    // Don't react to resize until after first initialization.
+    if (!demo->prepared) {
+        if (demo->is_minimized) {
+            demo_prepare(demo);
+        }
+        return;
+    }
+    // In order to properly resize the window, we must re-create the swapchain
+    // AND redo the command buffers, etc.
+    //
+    // First, perform part of the demo_cleanup() function:
+    demo->prepared = false;
+    vkDeviceWaitIdle(demo->device);
+
+    for (i = 0; i < demo->swapchain_image_count; i++) {
+        vkDestroyFramebuffer(demo->device, demo->swapchain_image_resources[i].framebuffer, NULL);
+    }
+    vkDestroyDescriptorPool(demo->device, demo->descriptor_pool, NULL);
+
+    vkDestroyPipeline(demo->device, demo->pipeline, NULL);
+    vkDestroyPipelineCache(demo->device, demo->pipeline_cache, NULL);
+    vkDestroyRenderPass(demo->device, demo->renderpass, NULL);
+    vkDestroyPipelineLayout(demo->device, demo->pipeline_layout, NULL);
+    vkDestroyDescriptorSetLayout(demo->device, demo->descriptor_layout, NULL);
+
+    for (i = 0; i < _TEXTURE_COUNT; i++) {
+        vkDestroyImageView(demo->device, demo->textures[i].view, NULL);
+        vkDestroyImage(demo->device, demo->textures[i].image, NULL);
+        vkFreeMemory(demo->device, demo->textures[i].mem, NULL);
+        vkDestroySampler(demo->device, demo->textures[i].sampler, NULL);
+    }
+
+    vkDestroyImageView(demo->device, demo->depth.view, NULL);
+    vkDestroyImage(demo->device, demo->depth.image, NULL);
+    vkFreeMemory(demo->device, demo->depth.mem, NULL);
+
+    for (i = 0; i < demo->swapchain_image_count; i++) {
+        vkDestroyImageView(demo->device, demo->swapchain_image_resources[i].view, NULL);
+        vkFreeCommandBuffers(demo->device, demo->cmd_pool, 1, &demo->swapchain_image_resources[i].cmd);
+        vkDestroyBuffer(demo->device, demo->swapchain_image_resources[i].uniform_buffer, NULL);
+        vkUnmapMemory(demo->device, demo->swapchain_image_resources[i].uniform_memory);
+        vkFreeMemory(demo->device, demo->swapchain_image_resources[i].uniform_memory, NULL);
+    }
+    vkDestroyCommandPool(demo->device, demo->cmd_pool, NULL);
+    demo->cmd_pool = VK_NULL_HANDLE;
+    if (demo->separate_present_queue) {
+        vkDestroyCommandPool(demo->device, demo->cmd_pool_present, NULL);
+    }
+    free(demo->swapchain_image_resources);
+
+    // Second, re-perform the demo_prepare() function, which will re-create the
+    // swapchain:
+    demo_prepare(demo);
+}
+static void
+draw_main (Demo * demo) {
+    VkResult err;
+
+    // Ensure no more than FRAME_LAG renderings are outstanding
+    vkWaitForFences(demo->device, 1, &demo->fences[demo->frame_index], VK_TRUE, UINT64_MAX);
+    vkResetFences(demo->device, 1, &demo->fences[demo->frame_index]);
+
+    do {
+        // Get the index of the next available swapchain image:
+        err = demo->fpAcquireNextImageKHR(
+            demo->device,
+            demo->swapchain,
+            UINT64_MAX,
+            demo->image_acquired_semaphores[demo->frame_index],
+            VK_NULL_HANDLE, &demo->current_buffer
+        );
+
+        if (err == VK_ERROR_OUT_OF_DATE_KHR) {
+            // demo->swapchain is out of date (e.g. the window was resized) and
+            // must be recreated:
+            demo_resize(demo);
+        } else if (err == VK_SUBOPTIMAL_KHR) {
+            // demo->swapchain is not as optimal as it could be, but the platform's
+            // presentation engine will still present the image correctly.
+            break;
+        } else if (err == VK_ERROR_SURFACE_LOST_KHR) {
+            vkDestroySurfaceKHR(demo->inst, demo->surface, NULL);
+            build_surface(demo);
+            demo_resize(demo);
+        } else {
+            _ASSERT_EXPR(0 == err, "could not aquire next available swapchain image");
+        }
+    } while (err != VK_SUCCESS);
+
+    //
+    // update_data_buffer(demo);
+
+    // Wait for the image acquired semaphore to be signaled to ensure
+    // that the image won't be rendered to until the presentation
+    // engine has fully released ownership to the application, and it is
+    // okay to render to the image.
+    VkPipelineStageFlags pipeline_stage_flags;
+    VkSubmitInfo submit_info;
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.pNext = NULL;
+    submit_info.pWaitDstStageMask = &pipeline_stage_flags;
+    pipeline_stage_flags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &demo->image_acquired_semaphores[demo->frame_index];
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &demo->swapchain_image_resources[demo->current_buffer].cmd;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &demo->draw_complete_semaphores[demo->frame_index];
+    err = vkQueueSubmit(demo->graphics_queue, 1, &submit_info, demo->fences[demo->frame_index]);
+    _ASSERT_EXPR(0 == err, "vkQueueSubmit failed");
+
+    if (demo->separate_present_queue) {
+        // If we are using separate queues, change image ownership to the
+        // present queue before presenting, waiting for the draw complete
+        // semaphore and signalling the ownership released semaphore when finished
+        VkFence nullFence = VK_NULL_HANDLE;
+        pipeline_stage_flags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &demo->draw_complete_semaphores[demo->frame_index];
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &demo->swapchain_image_resources[demo->current_buffer].graphics_to_present_cmd;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &demo->image_ownership_semaphores[demo->frame_index];
+        err = vkQueueSubmit(demo->present_queue, 1, &submit_info, nullFence);
+        _ASSERT_EXPR(0 == err, "vkQueueSubmit failed");
+    }
+
+    // If we are using separate queues we have to wait for image ownership,
+    // otherwise wait for draw complete
+    VkPresentInfoKHR present = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = NULL,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = (demo->separate_present_queue) ? &demo->image_ownership_semaphores[demo->frame_index]
+                                                          : &demo->draw_complete_semaphores[demo->frame_index],
+        .swapchainCount = 1,
+        .pSwapchains = &demo->swapchain,
+        .pImageIndices = &demo->current_buffer,
+    };
+
+    err = demo->fpQueuePresentKHR(demo->present_queue, &present);
+    demo->frame_index += 1;
+    demo->frame_index %= FRAME_LAG;
+
+    if (err == VK_ERROR_OUT_OF_DATE_KHR) {
+        // demo->swapchain is out of date (e.g. the window was resized) and
+        // must be recreated:
+        demo_resize(demo);
+    } else if (err == VK_SUBOPTIMAL_KHR) {
+        // demo->swapchain is not as optimal as it could be, but the platform's
+        // presentation engine will still present the image correctly.
+    } else if (err == VK_ERROR_SURFACE_LOST_KHR) {
+        vkDestroySurfaceKHR(demo->inst, demo->surface, NULL);
+        build_surface(demo);
+        demo_resize(demo);
+    } else {
+        _ASSERT_EXPR(0 == err, "vkQueueSubmit failed");
+    }
+}
+
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -1721,9 +2043,7 @@ WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
         if (0 == global_in_callback) {
             if (global_demo->prepared) {
 
-                //
-                // draw_main
-
+                draw_main(global_demo);
 
                 global_demo->cur_frame++;
                 if (global_demo->frame_count != INT32_MAX && global_demo->cur_frame == global_demo->frame_count) {
@@ -2080,13 +2400,7 @@ WinMain (
     //
     // Init swapchain
     //
-    VkWin32SurfaceCreateInfoKHR surface_info = {0};
-    surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    surface_info.pNext = NULL;
-    surface_info.hinstance = global_demo->connection;
-    surface_info.hwnd = global_demo->window;
-    err = vkCreateWin32SurfaceKHR(global_demo->inst, &surface_info, NULL, &global_demo->surface);
-    _ASSERT_EXPR(0 == err, _T("vkCreateWin32SurfaceKHR failed"));
+    build_surface(global_demo);
     VkBool32 * supports_presents = (VkBool32 *)calloc(global_demo->queue_family_count, sizeof(VkBool32));
     for (UINT i = 0; i < global_demo->queue_family_count; ++i) {
         global_demo->fpGetPhysicalDeviceSurfaceSupportKHR(global_demo->gpu, i, global_demo->surface, &supports_presents[i]);
@@ -2212,104 +2526,10 @@ WinMain (
     // -- get Memory information and properties
     vkGetPhysicalDeviceMemoryProperties(global_demo->gpu, &global_demo->memory_properties);
 #pragma endregion
-    //
-    //  Initi command buffer
-    //
-    if (global_demo->cmd_pool == VK_NULL_HANDLE) {
-        VkCommandPoolCreateInfo pool_ci = {0};
-        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pool_ci.pNext = NULL;
-        pool_ci.queueFamilyIndex = global_demo->graphics_queue_family_index;
-        pool_ci.flags = 0;
-        err = vkCreateCommandPool(global_demo->device, &pool_ci, NULL, &global_demo->cmd_pool);
-        _ASSERT_EXPR(0 == err, _T("vkCreateCommandPool failed"));
-    }
-    VkCommandBufferAllocateInfo cmd_buf_alloc_ci = {0};
-    cmd_buf_alloc_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_buf_alloc_ci.pNext = NULL;
-    cmd_buf_alloc_ci.commandPool = global_demo->cmd_pool;
-    cmd_buf_alloc_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_buf_alloc_ci.commandBufferCount = 1;
-    err = vkAllocateCommandBuffers(global_demo->device, &cmd_buf_alloc_ci, &global_demo->cmd_buf);
-    _ASSERT_EXPR(0 == err, _T("vkAllocateCommandBuffers failed"));
 
-    VkCommandBufferBeginInfo cmd_buf_begin_ci = {0};
-    cmd_buf_begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    cmd_buf_begin_ci.pNext = NULL;
-    cmd_buf_begin_ci.flags = 0;
-    cmd_buf_begin_ci.pInheritanceInfo = NULL;
-    err = vkBeginCommandBuffer(global_demo->cmd_buf, &cmd_buf_begin_ci);
-    _ASSERT_EXPR(0 == err, _T("vkBeginCommandBuffer failed"));
+    demo_prepare(global_demo);
 
 #pragma endregion
-
-    build_backbuffers(global_demo);
-
-    build_depthbuffer(global_demo);
-
-    build_textures(global_demo);
-
-    build_cube(global_demo);
-
-    build_descriptor_layout(global_demo);
-
-    build_renderpass(global_demo);
-
-    build_pipeline(global_demo);
-
-    for (uint32_t i = 0; i < global_demo->swapchain_image_count; i++) {
-        err = vkAllocateCommandBuffers(global_demo->device, &cmd_buf_alloc_ci, &global_demo->swapchain_image_resources[i].cmd);
-        _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
-    }
-
-    if (global_demo->separate_present_queue) {
-        const VkCommandPoolCreateInfo present_cmd_pool_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            .pNext = NULL,
-            .queueFamilyIndex = global_demo->present_queue_family_index,
-            .flags = 0,
-        };
-        err = vkCreateCommandPool(global_demo->device, &present_cmd_pool_info, NULL, &global_demo->cmd_pool_present);
-        _ASSERT_EXPR(0 == err, "vkCreateCommandPool failed");
-        const VkCommandBufferAllocateInfo present_cmd_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .pNext = NULL,
-            .commandPool = global_demo->cmd_pool_present,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        for (uint32_t i = 0; i < global_demo->swapchain_image_count; i++) {
-            err = vkAllocateCommandBuffers(global_demo->device, &present_cmd_info,
-                                           &global_demo->swapchain_image_resources[i].graphics_to_present_cmd);
-            _ASSERT_EXPR(0 == err, "vkAllocateCommandBuffers failed");
-            build_image_ownership_cmd(global_demo, i);
-        }
-    }
-
-    build_descriptor_pool(global_demo);
-    build_descriptor_set(global_demo);
-
-
-    build_framebuffers(global_demo);
-
-
-    for (UINT i = 0; i < global_demo->swapchain_image_count; i++) {
-        global_demo->current_buffer = i;
-        draw_cmd_init(global_demo, global_demo->swapchain_image_resources[i].cmd);
-    }
-
-
-
-    //
-    // flush cmd init
-
-
-    //
-    // implement MS-Windows event handling function:
-
-
-    global_demo->current_buffer = 0;
-    global_demo->prepared = true;
 
 #pragma region Main Loop
     // Run the message loop.
