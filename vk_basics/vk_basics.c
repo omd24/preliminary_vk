@@ -15,6 +15,7 @@
 #endif
 
 #include <windows.h>
+#include <windowsx.h>   // mouse handling
 #include <tchar.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -38,6 +39,8 @@
         if (!global_suppress_popups)                        \
             MessageBox(NULL, _T(err_msg), _T(err_class), MB_OK);    \
     } while (0)
+
+#define CLAMP_VALUE(val, lb, ub)        (val) < (lb) ? (lb) : (val > ub ? ub : val); 
 
 // Vulkan
 #include <vulkan/vulkan.h>
@@ -166,7 +169,8 @@ static const float g_uv_buffer_data [] = {
     1.0f, 0.0f,
 };
 
-static char *tex_files [] = {"lunarg.ppm"};
+//static char *tex_files [] = {"lunarg.ppm"};
+static char * tex_files [] = {"simple.ppm"};
 
 #pragma endregion
 
@@ -197,7 +201,7 @@ typedef struct {
 } TextureObject;
 
 typedef struct {
-    // Must start with MVP
+    // Must start with mvp
     float mvp[4][4];
     float position[12 * 3][4];
     float attr[12 * 3][4];
@@ -272,6 +276,14 @@ typedef struct {
     mat4x4 projection_matrix;
     mat4x4 view_matrix;
     mat4x4 model_matrix;
+
+    // camera settings (spherical coordinate)
+    float theta;
+    float phi;
+    float radius;
+
+    // mouse position
+    POINT mouse;
 
     VkShaderModule vertex_shader_module;
     VkShaderModule pixel_shader_module;
@@ -455,6 +467,22 @@ demo_init (Demo * demo, int w, int h, HINSTANCE win32_hinstance, HWND wnd) {
     demo->present_mode = VK_PRESENT_MODE_FIFO_KHR;
     demo->validate = true;
     demo->paused = false;
+
+    demo->theta = 1.5f * (float)PI;
+    demo->phi = (float)PI / 4;
+    demo->radius = 7.0f;
+
+    vec3 eye = {0.0f, 3.0f, 5.0f};
+    vec3 origin = {0, 0, 0};
+    vec3 up = {0.0f, 1.0f, 0.0};
+
+    float aspect_ratio = (float)demo->width / demo->height;
+    mat4x4_perspective(demo->projection_matrix, (float)DEGREES_TO_RADIANS(45.0f), aspect_ratio, 1.0f, 1000.0f);
+
+    mat4x4_look_at(demo->view_matrix, eye, origin, up);
+    mat4x4_identity(demo->model_matrix);
+
+    demo->projection_matrix[1][1] *= -1;  // Flip projection matrix from GL to Vulkan orientation.
 }
 static void
 build_backbuffers (Demo * demo) {
@@ -749,39 +777,49 @@ build_depthbuffer (Demo * demo) {
     _ASSERT_EXPR(0 == err, "vkCreateImageView failed");
 }
 /* Convert ppm image data from header file into RGBA texture image */
-#include "lunarg.ppm.h"
-bool load_texture(
+//#include "lunarg.ppm.h"
+#include "simple.ppm.h"
+static bool
+load_texture (
     char const * filename,
     uint8_t * rgba_data,
     VkSubresourceLayout * layout,
     int32_t * width, int32_t * height
 ) {
-    (void)filename;
-    char *cPtr;
-    cPtr = (char *)lunarg_ppm;
-    if ((unsigned char *)cPtr >= (lunarg_ppm + lunarg_ppm_len) || strncmp(cPtr, "P6\n", 3)) {
+    (void)filename; // NOTE(omid): Not using actual texture file for now! 
+    char * c_ptr;
+
+    //c_ptr = (char *)simple_ppm;
+    c_ptr = (char *)simple_ppm;
+    if ((unsigned char *)c_ptr >= (simple_ppm + simple_ppm_len) || (0 != strncmp(c_ptr, "P6\n", 3))) {
         return false;
     }
-    while (strncmp(cPtr++, "\n", 1))
-        ;
-    sscanf(cPtr, "%u %u", width, height);
+
+    // skip to next line
+    while (strncmp(c_ptr++, "\n", 1));
+
+    sscanf(c_ptr, "%u %u", width, height);
     if (rgba_data == NULL) {
         return true;
     }
-    while (strncmp(cPtr++, "\n", 1))
-        ;
-    if ((unsigned char *)cPtr >= (lunarg_ppm + lunarg_ppm_len) || strncmp(cPtr, "255\n", 4)) {
+
+    // skip to next line
+    while (strncmp(c_ptr++, "\n", 1));
+
+    if ((unsigned char *)c_ptr >= (simple_ppm + simple_ppm_len) || (0 != strncmp(c_ptr, "255\n", 4))) {
         return false;
     }
-    while (strncmp(cPtr++, "\n", 1))
-        ;
+
+    // skip to next line
+    while (strncmp(c_ptr++, "\n", 1));
+
     for (int y = 0; y < *height; y++) {
         uint8_t *rowPtr = rgba_data;
         for (int x = 0; x < *width; x++) {
-            memcpy(rowPtr, cPtr, 3);
+            memcpy(rowPtr, c_ptr, 3);
             rowPtr[3] = 255; /* Alpha of 1 */
             rowPtr += 4;
-            cPtr += 3;
+            c_ptr += 3;
         }
         rgba_data += layout->rowPitch;
     }
@@ -1099,7 +1137,7 @@ build_cube (Demo * demo) {
     mat4x4_mul(VP, demo->projection_matrix, demo->view_matrix);
     mat4x4_mul(MVP, VP, demo->model_matrix);
     memcpy(data.mvp, MVP, sizeof(MVP));
-    //    dumpMatrix("MVP", MVP);
+    //    dumpMatrix("mvp", mvp);
 
     for (unsigned int i = 0; i < 12 * 3; i++) {
         data.position[i][0] = g_vertex_buffer_data[i * 3];
@@ -1723,7 +1761,7 @@ build_surface (Demo * demo) {
     err = vkCreateWin32SurfaceKHR(demo->inst, &surface_info, NULL, &demo->surface);
     _ASSERT_EXPR(0 == err, _T("vkCreateWin32SurfaceKHR failed"));
 }
-static void 
+static void
 flush_cmd_init (Demo * demo) {
     VkResult err;
 
@@ -1739,7 +1777,7 @@ flush_cmd_init (Demo * demo) {
     err = vkCreateFence(demo->device, &fence_ci, NULL, &fence);
     _ASSERT_EXPR(0 == err, "error flushing cmd buf");
 
-    const VkCommandBuffer cmd_bufs[] = {demo->cmd_buf};
+    const VkCommandBuffer cmd_bufs [] = {demo->cmd_buf};
     VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                                 .pNext = NULL,
                                 .waitSemaphoreCount = 0,
@@ -1761,7 +1799,7 @@ flush_cmd_init (Demo * demo) {
     demo->cmd_buf = VK_NULL_HANDLE;
 }
 
-static void 
+static void
 destroy_texture (Demo * demo, TextureObject * tex_objs) {
     /* clean up staging resources */
     vkFreeMemory(demo->device, tex_objs->mem, NULL);
@@ -1872,9 +1910,9 @@ demo_prepare (Demo * demo) {
 }
 static void
 demo_resize (Demo * demo) {
-uint32_t i;
+    uint32_t i;
 
-    // Don't react to resize until after first initialization.
+        // Don't react to resize until after first initialization.
     if (!demo->prepared) {
         if (demo->is_minimized) {
             demo_prepare(demo);
@@ -1929,6 +1967,28 @@ uint32_t i;
     demo_prepare(demo);
 }
 static void
+update_data_buffer (Demo * demo) {
+    mat4x4 mvp, vp;
+    int mvp_size = sizeof(mvp);
+
+    // Convert Spherical to Cartesian coordinates.
+    float x = demo->radius * sinf(demo->phi) * cosf(demo->theta);
+    float z = demo->radius * sinf(demo->phi) * sinf(demo->theta);
+    float y = demo->radius * cosf(demo->phi);
+
+    vec3 pos = {x, y, z};
+    vec3 target = {0.0f, 0.0f, 0.0f};
+    vec3 up = {0.0f, 1.0f, 0.0f};
+
+    mat4x4_look_at(demo->view_matrix, pos, target, up);
+
+    mat4x4_mul(vp, demo->projection_matrix, demo->view_matrix);
+
+    mat4x4_mul(mvp, vp, demo->model_matrix);
+
+    memcpy(demo->swapchain_image_resources[demo->current_buffer].uniform_memory_ptr, (const void *)&mvp[0][0], mvp_size);
+}
+static void
 draw_main (Demo * demo) {
     VkResult err;
 
@@ -1963,8 +2023,7 @@ draw_main (Demo * demo) {
         }
     } while (err != VK_SUCCESS);
 
-    //
-    // update_data_buffer(demo);
+    update_data_buffer(demo);
 
     // Wait for the image acquired semaphore to be signaled to ensure
     // that the image won't be rendered to until the presentation
@@ -2033,7 +2092,34 @@ draw_main (Demo * demo) {
         _ASSERT_EXPR(0 == err, "vkQueueSubmit failed");
     }
 }
+static void
+handle_mouse_move (Demo * demo, WPARAM wParam, int x, int y) {
+    if ((wParam & MK_LBUTTON) != 0) {
+        // make each pixel correspond to a quarter of a degree
+        float dx = (float)DEGREES_TO_RADIANS(0.25f * (float)(x - demo->mouse.x));
+        float dy = (float)DEGREES_TO_RADIANS(0.25f * (float)(y - demo->mouse.y));
 
+        // update angles (to orbit camera around)
+        demo->theta += dx;
+        demo->phi += dy;
+
+        // clamp phi
+        double _phid = CLAMP_VALUE(demo->phi, 0.1f, PI - 0.1f);
+        demo->phi = (float)_phid;
+    } else if ((wParam & MK_RBUTTON) != 0) {
+        // make each pixel correspond to a 0.005 unit in scene
+        float dx = 0.005f * (float)(x - demo->mouse.x);
+        float dy = 0.005f * (float)(y - demo->mouse.y);
+
+        // update camera radius
+        demo->radius += dx - dy;
+
+        // clamp radius
+        demo->radius = CLAMP_VALUE(demo->radius, 3.0f, 15.0f);
+    }
+    demo->mouse.x = x;
+    demo->mouse.y = y;
+}
 LRESULT CALLBACK
 WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
     LRESULT result = -1;
@@ -2051,8 +2137,34 @@ WindowProc (HWND hwnd, UINT msg_code, WPARAM wparam, LPARAM lparam) {
                 }
             }
         }
-    }
-                 break;
+    } break;
+    case WM_SIZE: {
+    // Resize the application to the new window size, except when
+    // it was minimized. Vulkan doesn't support images or swapchains
+    // with width=0 and height=0.
+        if (wparam != SIZE_MINIMIZED && global_demo) {
+            if (global_demo->prepared) {
+                global_demo->width = lparam & 0xffff;
+                global_demo->height = (lparam & 0xffff0000) >> 16;
+                demo_resize(global_demo);
+            }
+        }
+    } break;
+        case WM_LBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_RBUTTONDOWN: {
+        global_demo->mouse.x = GET_X_LPARAM(lparam);
+        global_demo->mouse.y = GET_Y_LPARAM(lparam);
+        SetCapture(hwnd);
+    } break;
+    case WM_LBUTTONUP:
+    case WM_MBUTTONUP:
+    case WM_RBUTTONUP: {
+        ReleaseCapture();
+    } break;
+    case WM_MOUSEMOVE: {
+        handle_mouse_move(global_demo, wparam, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+    } break;
     case WM_DESTROY: {
         PostQuitMessage(0);
         result = 0;
@@ -2088,7 +2200,7 @@ WinMain (
         WS_OVERLAPPEDWINDOW,        // Window style
 
         // Size and position
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
 
         NULL,       // Parent window
         NULL,       // Menu
@@ -2556,7 +2668,11 @@ WinMain (
     }
 #pragma endregion
 
+    //
     // TODO(omid): Cleanups 
+
+
+
     return(0);
 }
 

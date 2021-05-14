@@ -23,11 +23,13 @@
 
 #include <math.h>
 
+#define PI       3.14159265358979323846   // pi
+
 // Converts degrees to radians.
-#define degreesToRadians(angleDegrees) (angleDegrees * M_PI / 180.0)
+#define DEGREES_TO_RADIANS(angle_degrees) (angle_degrees * PI / 180.0)
 
 // Converts radians to degrees.
-#define radiansToDegrees(angleRadians) (angleRadians * 180.0 / M_PI)
+#define RADIANS_TO_DEGREES(angle_radians) (angle_radians * 180.0 / PI)
 
 typedef float vec3[3];
 static inline void vec3_add(vec3 r, vec3 const a, vec3 const b) {

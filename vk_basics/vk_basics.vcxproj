@@ -154,6 +154,7 @@
   <ItemGroup>
     <ClInclude Include="linmath.h" />
     <ClInclude Include="lunarg.ppm.h" />
+    <ClInclude Include="simple.ppm.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
   <ItemGroup>

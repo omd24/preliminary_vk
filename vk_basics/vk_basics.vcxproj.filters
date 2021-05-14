@@ -29,6 +29,9 @@
     <ClInclude Include="lunarg.ppm.h">
       <Filter>Resource Files</Filter>
     </ClInclude>
+    <ClInclude Include="simple.ppm.h">
+      <Filter>Resource Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="cube.frag.inc">
